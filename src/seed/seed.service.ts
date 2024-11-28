@@ -37,7 +37,7 @@ export class SeedService {
     await this.pokemonModel.insertMany(pokemonToInsert);
     // es como (sql): insert into pokemons (name, no) del json recibido con todos los datos
 
-    return 'Seed Executed';
+    return 'Seed Generated Successfully';
   }
 
 }
