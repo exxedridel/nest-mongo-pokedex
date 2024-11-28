@@ -31,6 +31,13 @@ npm run start:dev
 ```
 GET http://localhost:3000/api/v2/seed
 ```
-
+## Ejecutar en producción (sin Docker)
+1. Copiar las variables de entorno del ```.env``` en la configuración del Host destino
+2. Reemplazar el valor de la variable __MONGODB__ por la URI proporcionada por el HOST dentro de su configuración
+3. Ejecutar
+```
+npm run build
+```
+4. Mandar push al repositorio remoto y correr el deploy en el Host destino
 
 
