@@ -8,6 +8,7 @@ import { CommonModule } from './common/common.module';
 import { SeedModule } from './seed/seed.module';
 import { EnvConfiguration } from './config/env.config';
 import { JoiValidationSchema } from './config/joi.validation';
+import { MessagesModule } from './messages/messages.module';
 
 @Module({
   imports: [
@@ -28,6 +29,8 @@ import { JoiValidationSchema } from './config/joi.validation';
     PokemonModule,
 
     CommonModule,
+
+    MessagesModule,
 
     SeedModule
   ],
