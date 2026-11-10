@@ -1,116 +1,107 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Comunicación de la aplicación Pokémon
 
-# POKEDEX API
+MySQL autentica y administra usuarios; Nest verifica su identidad actual y
+comunica las instancias React por Socket.IO. `/mensajes-prueba` permite elegir
+cualquier otro usuario registrado y conversar en privado. No hay una lista fija
+de dos correos. Esta etapa no incorpora sincronización de batallas.
 
-## Mensajes de prueba entre jugador y administrador
-
-Primera integración de los tres proyectos: MySQL autentica, Nest comunica por
-Socket.IO y React presenta `/mensajes-prueba`. Participan únicamente
-`hevedrios@gmail.com` y `najerad2223@gmail.com`. El remitente se obtiene del JWT
-verificado; el destinatario es siempre la otra cuenta.
-
-### Configurar antes de desplegar en Railway
+## Configurar antes de desplegar en Railway
 
 - `JWT_SECRET`: exactamente el mismo valor privado utilizado en `mysql-restapi`.
-  Es obligatorio para arrancar Nest. `SECRET_KEY` y `JWT_SEED` no sustituyen esta
-  variable. Nunca se comparte el secreto con React.
-- `FRONTEND_ORIGINS`: orígenes adicionales separados por comas, sin rutas; por
-  ejemplo `https://tu-frontend.up.railway.app,http://localhost:5173`.
-  Ya están permitidos `http://localhost:5173` y
-  `https://mern-app.up.railway.app`. El mismo listado se aplica a HTTP y Socket.IO.
-- Mantener `MONGODB` y las variables existentes: esta prueba no necesita crear
-  colecciones ni ejecutar el seed. Railway proporciona `PORT`.
+  Es obligatorio; `SECRET_KEY` y `JWT_SEED` no lo sustituyen. Nunca compartirlo
+  con React.
+- `AUTH_API_URL`: origen del servicio MySQL, sin `/api` ni otras rutas, por
+  ejemplo `https://mysql-restapi-production-5f4b.up.railway.app`. **Añadir esta
+  variable antes de desplegar la nueva versión de Nest.** Nest consulta
+  `GET /api/auth/me` y `GET /api/users/contacts` enviando el JWT por Bearer.
+  El servicio MySQL debe desplegar primero esos endpoints.
+- `FRONTEND_ORIGINS`: orígenes adicionales separados por comas y sin rutas.
+  Ya se permiten `http://localhost:5173` y `https://mern-app.up.railway.app`.
+  El listado se aplica a HTTP y Socket.IO.
+- Mantener `MONGODB` y las variables existentes. Esta mensajería no crea
+  colecciones ni requiere ejecutar el seed. Railway proporciona `PORT`.
 
-Instalar con `npm ci` y compilar con `npm run build`. El servicio se inicia con
-el comando de producción existente, `npm run start:prod`.
+Instalar con `npm ci`, compilar con `npm run build` e iniciar con
+`npm run start:prod`.
 
-El namespace es `/mensajes-prueba`, con transporte en `/socket.io/` sobre el mismo
-puerto HTTP. El prefijo HTTP `/api/v2` no se añade al namespace.
+La conexión requiere un JWT HS256 válido con `id`, `email` y `exp`, y una cuenta
+vigente confirmada por MySQL. La versión del token, eliminación de cuentas y
+cambios de contraseña/correo/rol los valida MySQL. Los JWT anteriores sin versión
+solo sirven mientras el servidor de identidad acepte su versión inicial cero.
+Nest comprueba también que ID y correo del JWT coincidan con el perfil obtenido;
+no reconstruye identidades si MySQL falla.
 
-### Protocolo mínimo
+Cada envío vuelve a consultar la identidad del emisor y el directorio. Las otras
+pestañas que van a recibir el mensaje también se revalidan antes de recibir datos
+privados. Una sesión revocada se desconecta; esto no es una notificación instantánea
+al editar cuentas: se detecta en la siguiente operación/comprobación. La caducidad
+del JWT además desconecta el socket mediante un temporizador. Las peticiones de
+identidad tienen timeout de tres segundos y no siguen redirecciones. Una caída
+temporal devuelve `AUTH_UNAVAILABLE`; no se confunde con una sesión revocada.
+
+## Protocolo de mensajes
 
 Conexión: `io("https://tu-nest.up.railway.app/mensajes-prueba", { auth: { token } })`.
+El transporte usa `/socket.io/` y el puerto HTTP existente. No añadir `/api/v2`
+al namespace.
 
-| Evento | Datos |
-| --- | --- |
-| Cliente → `mensajes:enviar` | `{ clientMessageId, text }`, con confirmación por callback. |
-| Servidor → `mensajes:recibir` | `{ id, clientMessageId, from, to, text, sentAt }`. |
-| Servidor → `mensajes:estado` | `{ selfEmail, peerEmail, peerOnline }`. |
-| Servidor → `mensajes:error` | `{ code, message }`, por ejemplo al caducar la sesión. |
+`UserPublic` contiene `{ id, email, first_name, last_name, role }`, con rol
+`player` o `admin`. Los contactos añaden `online`.
 
-Confirmación: `{ ok: true, message }` o `{ ok: false, error: { code, message } }`.
-Solo se admiten `clientMessageId` y `text`, de hasta 1000 caracteres. Un reintento
-con el mismo identificador y texto devuelve la confirmación anterior sin volver
-a emitirlo. La deduplicación dura hasta 15 minutos y tiene un límite de 1000
-entradas en memoria.
+| Evento                                   | Datos                                                                               |
+| ---------------------------------------- | ----------------------------------------------------------------------------------- |
+| Cliente → `mensajes:enviar`              | `{ clientMessageId, text, toUserId }`, con ACK por callback.                        |
+| Cliente → `mensajes:contactos:solicitar` | Sin datos; refresca el directorio y devuelve `{ ok: true, users }` o un error.      |
+| Servidor → `mensajes:recibir`            | `{ id, clientMessageId, from, to, fromUserId, toUserId, text, sentAt }`.            |
+| Servidor → `mensajes:estado`             | `{ selfEmail, selfUserId }`.                                                        |
+| Servidor → `mensajes:contactos`          | `{ users: [...UserPublic con online] }`; directorio inicial/refrescado y presencia. |
+| Servidor → `mensajes:error`              | `{ code, message }`. El rechazo inicial también llega en `connect_error.data`.      |
+
+El ACK de envío es `{ ok: true, message }` o
+`{ ok: false, error: { code, message } }`. El servidor determina el remitente
+desde la identidad verificada; solo admite los tres campos de envío indicados,
+texto de 1 a 1000 caracteres y un destino entero existente. Las salas internas
+usan ID estable, no correo. Solo reciben el emisor, destinatario y sus pestañas
+con sesiones vigentes; otro usuario conectado no recibe esa conversación.
+
+El `clientMessageId` admite 1 a 128 caracteres alfanuméricos y `_.:-`.
+Un reintento del mismo usuario con igual identificador, texto y destino devuelve
+el mensaje anterior sin volver a emitirlo. Reutilizarlo con otro texto o destino
+devuelve `MESSAGE_ID_CONFLICT`. La deduplicación dura hasta quince minutos y
+tiene un máximo de mil entradas en memoria.
 
 La confirmación indica aceptación en Nest, no lectura ni entrega a un usuario
-desconectado. No hay historial persistente ni entrega posterior. Usar **una sola
-instancia/réplica Nest** para esta prueba: presencia y deduplicación son locales
-al proceso. Los mensajes del navegador se pierden al salir o recargar.
+desconectado. No hay historial persistente ni entrega posterior. Utilizar una
+sola instancia/réplica Nest: presencia y deduplicación son locales al proceso.
+Los mensajes de la interfaz se pierden al salir o recargar. El directorio se
+refresca mediante `mensajes:contactos:solicitar`; no hay suscripción a cambios
+del CRUD MySQL. La selección de un contacto la mantiene cada navegador.
 
-### Prueba automatizada local
+## Prueba automatizada local
 
 ```bash
 npm run test:messages
 ```
 
-La suite inicia el módulo de mensajes en un puerto efímero y conecta clientes
-Socket.IO reales. Usa JWT firmados exclusivamente para pruebas con el contrato
-del login MySQL. No consulta la base de datos ni usa credenciales de Railway.
+La suite usa un módulo Nest aislado, clientes Socket.IO reales y un servidor HTTP
+de identidad simulado en puertos locales efímeros. Cubre nuevas cuentas,
+privacidad por ID, sesiones revocadas, expiración, errores/timeout de identidad,
+deduplicación y presencia con varias pestañas. No usa bases de datos,
+credenciales reales ni los servicios de Railway.
 
-### Comprobar desde los dos usuarios
-
-1. Desplegar Nest con las variables anteriores y el frontend actualizado.
-2. Entrar como `hevedrios@gmail.com` y abrir `/mensajes-prueba`.
-3. En una ventana privada, otro perfil o dispositivo, entrar como
-   `najerad2223@gmail.com` y abrir la misma ruta.
-4. Esperar que ambas páginas indiquen conexión y destinatario conectado.
-5. Enviar mensajes en ambos sentidos. Al cerrar una página, la otra debe indicar
-   que el destinatario está desconectado.
-
-Se necesitan ventanas privadas/perfiles diferentes porque el login actual usa
-`localStorage` compartido entre pestañas del mismo perfil.
+Para comprobar la aplicación completa, desplegar primero MySQL, después Nest con
+las variables anteriores y finalmente React; iniciar sesión con dos usuarios
+registrados en perfiles o dispositivos diferentes, abrir `/mensajes-prueba`,
+elegir al otro contacto y enviar mensajes en ambos sentidos. Las pestañas del
+mismo perfil comparten el login guardado en `localStorage`.
 
 ## Ejemplo original de catálogo
 
-## Stack usado
-* Nest.js (TypeScript)
-* MongoDB
+El proyecto conserva el ejemplo NestJS/TypeScript con MongoDB y sus rutas HTTP
+bajo `/api/v2`. Para desarrollo: instalar dependencias, copiar `.env.template`
+a `.env`, configurar las variables requeridas, iniciar MongoDB con
+`docker-compose up -d` y ejecutar `npm run start:dev`.
 
-## Ejecutar en desarrollo
-
-1. Clonar el repositorio
-2. Ejecutar
-```
-npm install
-```
-3. Tener Nest CLI instalado
-```
-npm i -g @nest/cli
-```
-4. Levantar la base de datos
-```
-docker-compose up -d
-```
-5. Clonar el archivo ```.env.template``` y renombrar la copia a ```.env```
-6. Correr el proyecto, ejecutar
-```
-npm run start:dev
-```
-7. Reconstruir la base de datos con la semilla
-```
-GET http://localhost:3000/api/v2/seed
-```
-## Ejecutar en producción (sin Docker)
-1. Copiar las variables de entorno del ```.env``` en la configuración del Host destino
-2. Reemplazar el valor de la variable __MONGODB__ por la URI proporcionada por el HOST dentro de su configuración
-3. Ejecutar
-```
-npm run build
-```
-4. Mandar push al repositorio remoto y correr el deploy en el Host destino
-
-
+La ruta original `GET /api/v2/seed` reconstruye destructivamente el catálogo de
+ejemplo; no participa en usuarios o mensajes y no debe ejecutarse para esta
+integración.

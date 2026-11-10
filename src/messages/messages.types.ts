@@ -1,21 +1,25 @@
-export const MESSAGE_ACCOUNTS = [
-  'hevedrios@gmail.com',
-  'najerad2223@gmail.com',
-] as const;
-
-export type MessageAccount = (typeof MESSAGE_ACCOUNTS)[number];
+export type UserPublic = {
+  id: number;
+  email: string;
+  first_name: string;
+  last_name: string;
+  role: 'player' | 'admin';
+};
 
 export type MessageIdentity = {
-  userId: string;
-  email: MessageAccount;
+  user: UserPublic;
   expiresAt: number;
 };
+
+export type MessageContact = UserPublic & { online: boolean };
 
 export type TestMessage = {
   id: string;
   clientMessageId: string;
-  from: MessageAccount;
-  to: MessageAccount;
+  from: string;
+  to: string;
+  fromUserId: number;
+  toUserId: number;
   text: string;
   sentAt: string;
 };
@@ -27,4 +31,8 @@ export type MessageError = {
 
 export type MessageAck =
   | { ok: true; message: TestMessage }
+  | { ok: false; error: MessageError };
+
+export type ContactsAck =
+  | { ok: true; users: MessageContact[] }
   | { ok: false; error: MessageError };
