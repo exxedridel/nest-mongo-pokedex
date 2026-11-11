@@ -19,6 +19,12 @@ jugadores viven en un documento y se actualizan mediante revisión/CAS; no se
 requieren transacciones Mongo entre documentos. Las escrituras se confirman
 después de guardar con journaling. No hay TTL que elimine batallas pendientes.
 
+El schema conserva los objetos vacíos (`minimize: false`): `runtime.pending: {}`
+significa que aún no se eligieron acciones. Eliminarlos provocaba un fallo al
+abrir los controles del administrador. Las lecturas recuperan esos mapas en
+documentos anteriores; los campos opcionales de snapshots solo se restauran si
+coinciden con su hash original. Las reservas y el motor no se reinician.
+
 Fases: `collecting → ready → active → finished → finalizing → finalized`.
 Solo collecting/ready pueden cancelarse. Los locks se liberan al cancelar o
 después de que ambos propietarios confirmen el guardado del resultado final.
@@ -59,7 +65,10 @@ Las pruebas usan un repositorio Memory y sockets reales: cubren reservas
 concurrentes, CAS/reinicio, privacidad, host antiguo, turnos, deduplicación,
 resultado inmutable y liberación posterior a ambos ACK. `PvpModule.withRepository`
 y `MemoryPvpRepository` permiten QA aislado sin iniciar Mongo. La colección y los
-índices reales deben comprobarse después en el entorno desplegado.
+índices reales deben comprobarse después en el entorno desplegado. También
+ejecutan MongoPvpRepository con Mongoose real y una colección simulada para
+comprobar la serialización de insert/replaceOne y recuperación de registros
+anteriores; esta comprobación no requiere un servidor Mongo.
 
 ## Configurar antes de desplegar en Railway
 

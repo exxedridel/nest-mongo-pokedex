@@ -19,7 +19,11 @@ controla ambos lados; jugador solo snapshot/vista propia/applied. No desbloquear
 por desconexion/timeout; liberar tras ambos guardados. Epoch cerca host antiguo.
 Buffer compartido Socket.IO 4MiB, validadores separados: chat texto1000chars,
 checkpoint2MiB/documento4MiB. Una replica. Ver README/PVP_PROTOCOL de workspace.
-test:pvp usa Memory/socket sinMongo; coleccion/indices reales faltan verificar.
+Correccion 2026-11-11: mantener minimize:false en schema PvP; objetos vacios
+Mixed como runtime.pending son datos del protocolo, no campos prescindibles.
+Lecturas recuperan mapas legacy conocidos; snapshots solo con hash original
+exacto. No reconstruir motor/requests ni liberar reservas. test:pvp incluye
+regresion con Mongoose real y driver simulado; Mongo/indices reales pendientes.
 
 No guardar credenciales o tokens en la documentacion. Actualizar el contexto cuando el usuario confirme nuevos acuerdos.
 

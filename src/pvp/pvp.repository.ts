@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Schema } from 'mongoose';
 import { Battle, clone, fail } from './pvp.types';
+import { digest } from './pvp.validation';
 
 export const PVP_REPOSITORY = Symbol('PVP_REPOSITORY');
 export const PVP_MODEL = 'PvpBattle';
@@ -35,7 +36,14 @@ export const PvpBattleSchema = new Schema(
     results: Schema.Types.Mixed,
     lastCheckpoint: Schema.Types.Mixed,
   },
-  { collection: 'pvp_battles', versionKey: false, strict: 'throw' },
+  {
+    collection: 'pvp_battles',
+    versionKey: false,
+    strict: 'throw',
+    // Empty dictionaries are protocol data, especially runtime.pending. Mongo
+    // must preserve them, including inside Mixed fields and replacements.
+    minimize: false,
+  },
 );
 PvpBattleSchema.index({ creationKey: 1 }, { unique: true });
 PvpBattleSchema.index(
@@ -47,6 +55,47 @@ PvpBattleSchema.index(
   { unique: true, partialFilterExpression: { lockHeld: true } },
 );
 
+/** Recover only empty dictionaries removed by the former minimize:true schema.
+ * Never rebuild engine/requests or change HP, choices, revisions or reservations.
+ */
+function restorePersistedBattle(battle: Battle | null): Battle | null {
+  if (!battle) return battle;
+  if (battle.commandHashes === undefined) battle.commandHashes = {};
+  if (battle.session?.runtime?.pending === undefined && battle.session?.runtime)
+    battle.session.runtime.pending = {};
+  for (const side of ['a', 'b'] as const) {
+    for (const capture of battle.session?.teams?.[side]?.pokemons ?? [])
+      if (capture.statusTurns === undefined) capture.statusTurns = {};
+    for (const patch of battle.results?.[side]?.patches ?? [])
+      if (patch.statusTurns === undefined) patch.statusTurns = {};
+
+    const snapshot = battle.players?.[side]?.snapshot;
+    if (
+      !snapshot ||
+      !Array.isArray(snapshot.pokemons) ||
+      snapshot.pokemons.length > 6
+    )
+      continue;
+    // A snapshot can legitimately omit optional statusTurns. Restore only the
+    // exact subset of empty maps authenticated by its ORIGINAL content hash.
+    const missing = snapshot.pokemons.flatMap((capture, index) =>
+      capture.statusTurns === undefined ? [index] : [],
+    );
+    if (!missing.length || digest(snapshot.pokemons) === snapshot.baseHash)
+      continue;
+    for (let mask = 1; mask < 1 << missing.length; mask++) {
+      const candidate = clone(snapshot.pokemons);
+      missing.forEach((index, bit) => {
+        if (mask & (1 << bit)) candidate[index].statusTurns = {};
+      });
+      if (digest(candidate) === snapshot.baseHash) {
+        snapshot.pokemons = candidate;
+        break;
+      }
+    }
+  }
+  return battle;
+}
 @Injectable()
 export class MongoPvpRepository implements PvpRepository {
   constructor(@InjectModel(PVP_MODEL) private readonly model: Model<any>) {}
@@ -54,21 +103,26 @@ export class MongoPvpRepository implements PvpRepository {
     await this.model.createIndexes();
   }
   async get(battleId: string): Promise<Battle | null> {
-    return this.model.findById(battleId).select('-_id').lean<Battle>().exec();
+    return restorePersistedBattle(
+      await this.model.findById(battleId).select('-_id').lean<Battle>().exec(),
+    );
   }
   async byCreationKey(creationKey: string): Promise<Battle | null> {
-    return this.model
-      .findOne({ creationKey })
-      .select('-_id')
-      .lean<Battle>()
-      .exec();
+    return restorePersistedBattle(
+      await this.model
+        .findOne({ creationKey })
+        .select('-_id')
+        .lean<Battle>()
+        .exec(),
+    );
   }
   async locked(): Promise<Battle[]> {
-    return this.model
+    const battles = await this.model
       .find({ lockHeld: true })
       .select('-_id')
       .lean<Battle[]>()
       .exec();
+    return battles.map((battle) => restorePersistedBattle(battle)!);
   }
   async insert(battle: Battle) {
     try {
