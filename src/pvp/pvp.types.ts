@@ -60,8 +60,29 @@ export type Actor = {
   socketId: string;
   token: string;
 };
+export type TrainerTeam = {
+  name: string;
+  pokemons: Capture[];
+  activeCaptureId: string | null;
+};
+export type BattlePlayer = {
+  user: UserPublic;
+  clientId: string;
+  snapshot?: Snapshot;
+};
+export type BattleTrainer = {
+  presetId: string;
+  region: 'kanto';
+  name: string;
+  category: 'gym' | 'elite-four' | 'rival';
+  location: string;
+  starterType?: 'grass' | 'fire' | 'water';
+  team: TrainerTeam;
+};
 export type Battle = {
   battleId: string;
+  mode?: 'trainer';
+  trainer?: BattleTrainer;
   creationKey: string;
   creationHash: string;
   phase: Phase;
@@ -71,17 +92,16 @@ export type Battle = {
   lockedUserIds: number[];
   adminId: number;
   host: { userId: number; clientId: string; epoch: number };
-  players: Record<
-    Side,
-    { user: UserPublic; clientId: string; snapshot?: Snapshot }
-  >;
+  players: { a: BattlePlayer; b?: BattlePlayer };
   session: Record<string, any> | null;
   commands: Command[];
   commandHashes: Record<string, string>;
   applied: Record<Side, boolean>;
-  results?: Record<Side, Result>;
+  results?: Partial<Record<Side, Result>>;
   lastCheckpoint?: { hash: string; expectedRevision: number; epoch: number };
 };
+export const humanSides = (battle: Battle): Side[] =>
+  battle.mode === 'trainer' ? ['a'] : SIDES;
 export class PvpError extends Error {
   constructor(
     public readonly code: string,

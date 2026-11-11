@@ -9,6 +9,17 @@ Acuerdo del usuario confirmado el 2026-11-08:
 
 Si esta disponible, leer [la memoria compartida](../PROJECT_MEMORY.md). Este resumen se conserva tambien aqui para sesiones que abran solo este repositorio.
 
+Trainer Battle autorizado 2026-11-11 amplía /pvp: mode:'trainer', preset Kanto
+servidor, players sólo a humano y trainer descriptor+team (team sólo admin).
+create acepta playerAId+trainerPresetId exclusivamente de playerBId. Reserva/
+resultado/ACK únicamente A; applied.b=true. Mantener pausa con humano original
+y epoch/CAS. IA AUTOMÁTICA y motor siguen en React admin, no Nest. Catálogo
+18 presets/68 slots exactos JSON copiado a dist via nest-cli asset. NPC escala
+HP al snapshot A y no modifica stats/roster/moves. Recharge move0 locked/PP0
+soportado, Struggle165 pp0/maxpp0 listado permitido; no saltar turnos con wait.
+30 tests/build aprobados; desplegar Nest
+y React sin variables nuevas. Ver memoria/protocolo para UI y validación Chrome.
+
 Evaluar Nest como servicio de comunicacion en tiempo real. No concluir que sobra
 porque su catalogo HTTP no se consuma. El motor permanece en el panel admin.
 El alcance futuro confirmado son batallas PvP por instantaneas y resultados;

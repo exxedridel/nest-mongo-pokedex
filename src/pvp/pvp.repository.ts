@@ -19,6 +19,8 @@ export const PvpBattleSchema = new Schema(
   {
     _id: { type: String, required: true },
     battleId: { type: String, required: true },
+    mode: { type: String, enum: ['trainer'] },
+    trainer: Schema.Types.Mixed,
     creationKey: { type: String, required: true },
     creationHash: { type: String, required: true },
     phase: { type: String, required: true },
@@ -63,6 +65,8 @@ function restorePersistedBattle(battle: Battle | null): Battle | null {
   if (battle.commandHashes === undefined) battle.commandHashes = {};
   if (battle.session?.runtime?.pending === undefined && battle.session?.runtime)
     battle.session.runtime.pending = {};
+  for (const capture of battle.trainer?.team?.pokemons ?? [])
+    if (capture.statusTurns === undefined) capture.statusTurns = {};
   for (const side of ['a', 'b'] as const) {
     for (const capture of battle.session?.teams?.[side]?.pokemons ?? [])
       if (capture.statusTurns === undefined) capture.statusTurns = {};

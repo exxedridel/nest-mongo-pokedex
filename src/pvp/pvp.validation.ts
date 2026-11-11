@@ -347,7 +347,9 @@ export function validateChoice(value: any): Choice {
   object(value);
   if (value.kind === 'move') {
     object(value, ['kind', 'moveId']);
-    integer(value.moveId, 1, 354);
+    // Native simulator uses move 0 for recharge; its contextual availability is
+    // checked against the side's locked request, never against the team moves.
+    integer(value.moveId, 0, 354);
   } else if (value.kind === 'switch') {
     object(value, ['kind', 'captureId']);
     id(value.captureId);
@@ -414,13 +416,18 @@ export function validateSession(session: any, battle: Battle) {
     const team = session.teams[side];
     object(team, ['name', 'pokemons', 'activeCaptureId']);
     text(team.name, 200);
-    const original = battle.players[side].snapshot;
+    const npc = battle.mode === 'trainer' && side === 'b';
+    const original = npc
+      ? battle.trainer?.team
+      : battle.players[side]?.snapshot;
     if (
       !original ||
       !Array.isArray(team.pokemons) ||
       team.pokemons.length !== original.pokemons.length
     )
       fail('INVALID_CHECKPOINT', 'El equipo cambió durante el combate.');
+    if (npc && team.name !== battle.trainer.team.name)
+      fail('INVALID_CHECKPOINT', 'El Trainer debe conservar su preset.');
     const ids = new Set<string>();
     for (const mon of team.pokemons) {
       capture(mon);
@@ -438,12 +445,36 @@ export function validateSession(session: any, battle: Battle) {
         );
       if (!battle.session && hp(mon) !== hp(before))
         fail('INVALID_CHECKPOINT', 'El inicio debe conservar el HP enviado.');
+      if (
+        npc &&
+        !battle.session &&
+        (stableJson(mon.statuses ?? []) !== stableJson(before.statuses ?? []) ||
+          stableJson(mon.statusTurns ?? {}) !==
+            stableJson(before.statusTurns ?? {}) ||
+          stableJson(mon.pokemon.battleStages) !==
+            stableJson(before.pokemon.battleStages) ||
+          stableJson(mon.trainerStatusContext) !==
+            stableJson(before.trainerStatusContext))
+      )
+        fail(
+          'INVALID_CHECKPOINT',
+          'El Trainer debe iniciar con su estado original.',
+        );
     }
     if (
       ids.size !== team.pokemons.length ||
       (team.activeCaptureId !== null && !ids.has(team.activeCaptureId))
     )
       fail('INVALID_CHECKPOINT', 'Pokémon activo no válido.');
+    if (
+      npc &&
+      !battle.session &&
+      team.activeCaptureId !== battle.trainer.team.activeCaptureId
+    )
+      fail(
+        'INVALID_CHECKPOINT',
+        'El Trainer debe iniciar con el primer Pokémon del preset.',
+      );
   }
   if (!Array.isArray(session.history) || session.history.length > 500)
     fail('INVALID_CHECKPOINT', 'Historial demasiado grande.');
@@ -505,7 +536,12 @@ export function validateSession(session: any, battle: Battle) {
       fail('INVALID_CHECKPOINT', 'Movimientos de turno no válidos.');
     for (const move of request.moves) {
       object(move, ['id', 'name', 'pp', 'maxpp', 'disabled']);
-      integer(move.id, 1, 354);
+      integer(move.id, 0, 354);
+      if (move.id === 0 && !request.locked)
+        fail(
+          'INVALID_CHECKPOINT',
+          'La recarga requiere una solicitud forzada.',
+        );
       text(move.name, 100);
       integer(move.maxpp, 0, 100);
       integer(move.pp, 0, move.maxpp);
@@ -517,6 +553,13 @@ export function validateSession(session: any, battle: Battle) {
       !['dig', 'fly', 'dive', 'bounce'].includes(request.semiInvulnerable)
     )
       fail('INVALID_CHECKPOINT', 'Solicitud de turno no válida.');
+    if (
+      runtime.pending[side]?.kind === 'move' &&
+      runtime.pending[side].moveId === 0 &&
+      (!request.locked ||
+        !request.moves.some((move) => move.id === 0 && !move.disabled))
+    )
+      fail('INVALID_CHECKPOINT', 'La acción de recarga no está disponible.');
   }
   if (
     (session.phase === 'finished') !== runtime.ended ||

@@ -2,7 +2,17 @@ import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { AuthIdentityService } from '../messages/auth-identity.service';
 import { PVP_REPOSITORY, PvpRepository } from './pvp.repository';
-import { Actor, Battle, clone, fail, Result, Side, SIDES } from './pvp.types';
+import {
+  Actor,
+  Battle,
+  clone,
+  fail,
+  humanSides,
+  Result,
+  Side,
+  SIDES,
+} from './pvp.types';
+import { scaleTrainerTeam, trainerPreset } from './pvp.trainers';
 import {
   digest,
   hp,
@@ -44,7 +54,9 @@ export class PvpService implements OnModuleInit {
       );
   }
   private ownSide(battle: Battle, actor: Actor): Side | undefined {
-    return SIDES.find((side) => battle.players[side].user.id === actor.user.id);
+    return humanSides(battle).find(
+      (side) => battle.players[side].user.id === actor.user.id,
+    );
   }
   private member(battle: Battle, actor: Actor) {
     if (battle.adminId !== actor.user.id && !this.ownSide(battle, actor))
@@ -78,13 +90,13 @@ export class PvpService implements OnModuleInit {
     return side;
   }
   private async ownersOnline(battle: Battle) {
-    for (const side of SIDES) {
+    for (const side of humanSides(battle)) {
       const player = battle.players[side];
       const actor = this.current(player.user.id, player.clientId);
       if (!actor)
         fail(
           'PLAYER_OFFLINE',
-          'La batalla está pausada hasta que vuelvan ambos propietarios.',
+          'La batalla está pausada hasta que regresen sus jugadores.',
         );
       try {
         await this.auth.authenticate(actor.token);
@@ -144,7 +156,7 @@ export class PvpService implements OnModuleInit {
     if (battle.adminId === actor.user.id && !admin)
       fail('FORBIDDEN', 'Esta cuenta ya no es administradora.');
     const players: any = {};
-    for (const side of SIDES) {
+    for (const side of humanSides(battle)) {
       const player = battle.players[side];
       players[side] = {
         user: clone(player.user),
@@ -166,6 +178,11 @@ export class PvpService implements OnModuleInit {
       players,
       applied: clone(battle.applied),
     };
+    if (battle.mode === 'trainer') {
+      state.mode = 'trainer';
+      const { team, ...descriptor } = battle.trainer;
+      state.trainer = admin ? clone(battle.trainer) : clone(descriptor);
+    }
     if (admin) {
       state.session = clone(battle.session);
       state.commands = clone(battle.commands);
@@ -203,10 +220,16 @@ export class PvpService implements OnModuleInit {
     };
   }
   async create(actor: Actor, payload: any) {
-    object(payload, ['commandId', 'playerAId', 'playerBId']);
+    object(payload, ['commandId', 'playerAId', 'playerBId', 'trainerPresetId']);
     id(payload.commandId);
     integer(payload.playerAId, 1);
-    integer(payload.playerBId, 1);
+    const isTrainer = payload.trainerPresetId !== undefined;
+    const trainer = isTrainer
+      ? trainerPreset(payload.trainerPresetId)
+      : undefined;
+    if (isTrainer && payload.playerBId !== undefined)
+      fail('INVALID_PLAYERS', 'Selecciona un Trainer o un segundo jugador.');
+    if (!isTrainer) integer(payload.playerBId, 1);
     if (
       actor.user.role !== 'admin' ||
       this.current(actor.user.id, actor.clientId)?.socketId !== actor.socketId
@@ -215,7 +238,11 @@ export class PvpService implements OnModuleInit {
     if (payload.playerAId === payload.playerBId)
       fail('INVALID_PLAYERS', 'Selecciona dos jugadores distintos.');
     const creationKey = digest([actor.user.id, payload.commandId]);
-    const creationHash = digest([payload.playerAId, payload.playerBId]);
+    const creationHash = digest(
+      isTrainer
+        ? ['trainer', payload.playerAId, trainer.presetId]
+        : [payload.playerAId, payload.playerBId],
+    );
     const replay = await this.repository.byCreationKey(creationKey);
     if (replay) {
       if (replay.creationHash !== creationHash)
@@ -227,10 +254,9 @@ export class PvpService implements OnModuleInit {
     }
     const contacts = await this.auth.contacts(actor.token, actor.user.id);
     const players: any = {};
-    for (const [side, userId] of [
-      ['a', payload.playerAId],
-      ['b', payload.playerBId],
-    ] as [Side, number][]) {
+    const selections: [Side, number][] = [['a', payload.playerAId]];
+    if (!isTrainer) selections.push(['b', payload.playerBId]);
+    for (const [side, userId] of selections) {
       const candidate = this.current(userId);
       const user = contacts.find((entry) => entry.id === userId);
       if (!candidate || user?.role !== 'player')
@@ -242,20 +268,21 @@ export class PvpService implements OnModuleInit {
     }
     const battle: Battle = {
       battleId: randomUUID(),
+      ...(isTrainer ? { mode: 'trainer' as const, trainer } : {}),
       creationKey,
       creationHash,
       phase: 'collecting',
       revision: 0,
       checkpointRevision: 0,
       lockHeld: true,
-      lockedUserIds: [payload.playerAId, payload.playerBId],
+      lockedUserIds: selections.map(([, userId]) => userId),
       adminId: actor.user.id,
       host: { userId: actor.user.id, clientId: actor.clientId, epoch: 1 },
       players,
       session: null,
       commands: [],
       commandHashes: {},
-      applied: { a: false, b: false },
+      applied: { a: false, b: isTrainer },
     };
     try {
       await this.repository.insert(battle);
@@ -288,7 +315,12 @@ export class PvpService implements OnModuleInit {
       if (battle.phase !== 'collecting')
         fail('INVALID_PHASE', 'La batalla no está recopilando equipos.');
       battle.players[side].snapshot = clone(snapshot);
-      if (SIDES.every((key) => battle.players[key].snapshot))
+      if (battle.mode === 'trainer')
+        battle.trainer.team = scaleTrainerTeam(
+          battle.trainer,
+          snapshot.hpMultiplier,
+        );
+      if (humanSides(battle).every((key) => battle.players[key].snapshot))
         battle.phase = 'ready';
     });
   }
@@ -357,7 +389,7 @@ export class PvpService implements OnModuleInit {
             'INVALID_CHOICE',
             'Ese equipo debe esperar su siguiente solicitud de turno.',
           );
-        if (choice.kind === 'move' && (request.forceSwitch || request.locked))
+        if (choice.kind === 'move' && request.forceSwitch)
           fail('INVALID_CHOICE', 'Esta solicitud requiere otra acción.');
         if (
           choice.kind === 'switch' &&
@@ -365,10 +397,10 @@ export class PvpService implements OnModuleInit {
           (request.trapped || request.locked)
         )
           fail('INVALID_CHOICE', 'Ese equipo no puede cambiar ahora.');
-        if (choice.kind === 'wait' && !request.locked)
+        if (choice.kind === 'wait')
           fail(
             'INVALID_CHOICE',
-            'No hay una continuación obligatoria pendiente.',
+            'Elige el movimiento forzado para continuar; no se puede omitir el turno.',
           );
       }
       if (
@@ -393,7 +425,12 @@ export class PvpService implements OnModuleInit {
         choice.kind === 'move' &&
         !battle.session.runtime.requests[payload.side].moves.some(
           (move: any) =>
-            move.id === choice.moveId && !move.disabled && move.pp > 0,
+            move.id === choice.moveId &&
+            !move.disabled &&
+            (move.pp > 0 ||
+              request.locked ||
+              (move.id === 165 && move.pp === 0 && move.maxpp === 0)) &&
+            (choice.moveId !== 0 || request.locked),
         )
       )
         fail('INVALID_CHOICE', 'Ese movimiento no está disponible.');
@@ -487,7 +524,7 @@ export class PvpService implements OnModuleInit {
       if (battle.phase !== 'finished' || !battle.session?.runtime?.ended)
         fail('INVALID_PHASE', 'Finaliza solo una batalla terminada.');
       const results: any = {};
-      for (const side of SIDES) {
+      for (const side of humanSides(battle)) {
         const snapshot = battle.players[side].snapshot;
         const winner = battle.session.runtime.winner;
         const result: Result = {
@@ -544,7 +581,7 @@ export class PvpService implements OnModuleInit {
         );
       if (battle.applied[side]) return false;
       battle.applied[side] = true;
-      if (SIDES.every((key) => battle.applied[key])) {
+      if (humanSides(battle).every((key) => battle.applied[key])) {
         battle.phase = 'finalized';
         battle.lockHeld = false;
       }

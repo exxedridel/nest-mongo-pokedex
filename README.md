@@ -12,6 +12,28 @@ en React. Nest reserva sus identidades, recibe snapshots de 1–6 Pokémon y
 conserva el último checkpoint del motor y los resultados pendientes en Mongo.
 No calcula el combate ni reemplaza el guardado general de los jugadores.
 
+### Trainer Battle
+
+El mismo namespace soporta un humano A contra un NPC B. `pvp:create` recibe
+`{commandId,playerAId,trainerPresetId}` y reserva sólo al jugador A; no admite
+simultáneamente `playerBId`. Los 18 presets de Kanto (ocho líderes, cuatro Alto
+Mando y seis variantes del rival) se validan contra `pvp/kantoPresets.json`.
+El asset se copia a `dist` al compilar; no necesita API externa ni variables nuevas.
+
+Cuando llega el snapshot A, el NPC se prepara con su preset completo y el
+multiplicador de HP del propietario. La sesión mantiene dos equipos, pero
+`players` sólo contiene `a`. La IA y el motor se ejecutan en React administrador;
+Nest valida y persiste comandos/checkpoints. Sigue exigiendo conexión del jugador
+original y el anfitrión vigente para avanzar.
+
+Sólo A recibe un resultado. `applied.b` comienza en true porque el NPC no guarda
+partida; el documento se libera después del ACK de A. El jugador recibe el
+descriptor del Trainer sin su equipo completo ni el motor. Las reservas impiden
+que esa misma cuenta participe a la vez en PvP y Trainer Battle.
+Los checkpoints conservan especie, nivel, stats base y movimientos del preset.
+Se admite la solicitud nativa forzada Recharge (movimiento 0, PP 0), utilizada
+por Hyper Beam; no se permite omitir turnos con `wait`.
+
 `PvpModule.forMongo()` crea `pvp_battles` e índices únicos parciales para impedir
 que un jugador o administrador figure en dos batallas reservadas. Los índices
 deben estar disponibles antes de aceptar operaciones. Las reservas de ambos

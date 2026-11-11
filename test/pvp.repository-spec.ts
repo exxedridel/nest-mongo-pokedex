@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { MongoPvpRepository, PvpBattleSchema } from '../src/pvp/pvp.repository';
 import { digest } from '../src/pvp/pvp.validation';
 import { Battle } from '../src/pvp/pvp.types';
+import { trainerPreset } from '../src/pvp/pvp.trainers';
 const {
   createMongoosePvpFixture,
 } = require('./support/mongoose-pvp-model.cjs');
@@ -113,6 +114,23 @@ describe('Mongo PvP serialization and recovery (real Mongoose, fake driver)', ()
         .statusTurns,
     ).toEqual({});
     expect(await repository.compareAndSwap(battle(), 4)).toBe(false);
+  });
+  it('persists Trainer metadata and its single real owner across Mongo replacement', async () => {
+    const input = battle();
+    input.mode = 'trainer';
+    input.trainer = trainerPreset('kanto-brock');
+    delete input.players.b;
+    input.lockedUserIds = [2];
+    input.applied.b = true;
+    await repository.insert(input);
+    input.revision++;
+    expect(await repository.compareAndSwap(input, 4)).toBe(true);
+    const read = await repository.get(input.battleId);
+    expect(read.mode).toBe('trainer');
+    expect(read.trainer).toEqual(input.trainer);
+    expect(read.players.b).toBeUndefined();
+    expect(read.lockedUserIds).toEqual([2]);
+    expect(read.trainer.team.pokemons[0].statusTurns).toEqual({});
   });
 
   it.each(['get', 'byCreationKey', 'locked'] as const)(

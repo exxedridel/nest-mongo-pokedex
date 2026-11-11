@@ -11,6 +11,7 @@ import {
   PvpBattleSchema,
 } from '../src/pvp/pvp.repository';
 import { PvpService } from '../src/pvp/pvp.service';
+import { trainerPreset } from '../src/pvp/pvp.trainers';
 import { Actor, Battle, clone, Snapshot } from '../src/pvp/pvp.types';
 import {
   digest,
@@ -125,14 +126,18 @@ function session(battle: Battle): any {
     phase: 'battle',
     hpMultiplier: 1.3,
     teams: Object.fromEntries(
-      ['a', 'b'].map((side) => [
-        side,
-        {
-          name: side,
-          pokemons: clone(battle.players[side].snapshot.pokemons),
-          activeCaptureId: battle.players[side].snapshot.activeCaptureId,
-        },
-      ]),
+      ['a', 'b'].map((side) => {
+        const npc = side === 'b' && battle.mode === 'trainer';
+        const team = npc ? battle.trainer.team : battle.players[side].snapshot;
+        return [
+          side,
+          {
+            name: npc ? battle.trainer.team.name : side,
+            pokemons: clone(team.pokemons),
+            activeCaptureId: team.activeCaptureId,
+          },
+        ];
+      }),
     ),
     weather: { kind: 'none' },
     history: [],
@@ -189,6 +194,26 @@ describe('Durable PvP service, repository and private projection', () => {
   }
   async function active(): Promise<Battle> {
     const battle = await ready();
+    return service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 0,
+      session: session(battle),
+      processedCommandIds: [],
+    });
+  }
+  async function readyTrainer(presetId = 'kanto-brock'): Promise<Battle> {
+    const battle = await service.create(actors[1], {
+      commandId: 'create-trainer',
+      playerAId: 2,
+      trainerPresetId: presetId,
+    });
+    const snap = snapshot(battle, 2, actors[2].clientId);
+    snap.hpMultiplier = 2;
+    return service.snapshot(actors[2], { snapshot: snap });
+  }
+  async function activeTrainer(): Promise<Battle> {
+    const battle = await readyTrainer();
     return service.checkpoint(actors[1], {
       battleId: battle.battleId,
       hostEpoch: 1,
@@ -546,6 +571,335 @@ describe('Durable PvP service, repository and private projection', () => {
       (await other.create(actors[1], createPayload('after-cancel'))).phase,
     ).toBe('collecting');
   });
+  it('creates a Kanto Trainer battle with only one human owner and an immutable scaled preset', async () => {
+    const battle = await readyTrainer();
+    expect(battle.mode).toBe('trainer');
+    expect(battle.phase).toBe('ready');
+    expect(battle.lockedUserIds).toEqual([2]);
+    expect(battle.players.b).toBeUndefined();
+    expect(battle.applied).toEqual({ a: false, b: true });
+    expect(battle.trainer.presetId).toBe('kanto-brock');
+    expect(
+      battle.trainer.team.pokemons.map((p) => [p.pokemon.id, p.pokemon.level]),
+    ).toEqual([
+      [74, 12],
+      [95, 14],
+    ]);
+    expect(battle.trainer.team.pokemons[0].pokemon.hpMultiplier).toBe(2);
+    expect(
+      battle.trainer.team.pokemons[0].pokemon.stats.find((s) => s.name === 'hp')
+        .value,
+    ).toBe(62);
+    expect(
+      trainerPreset('kanto-brock').team.pokemons[0].pokemon.hpMultiplier,
+    ).toBe(1.3);
+    expect(service.view(battle, actors[1]).trainer.team).toEqual(
+      battle.trainer.team,
+    );
+    const own = service.view(battle, actors[2]);
+    expect(own.trainer.presetId).toBe('kanto-brock');
+    expect(own.trainer.name).toBeTruthy();
+    expect(own.trainer.team).toBeUndefined();
+    expect(own.players.b).toBeUndefined();
+    expect(own.session).toBeUndefined();
+    expect(own.snapshot).toEqual(battle.players.a.snapshot);
+    expect(() => service.view(battle, actors[3])).toThrow();
+  });
+  it('validates and deduplicates trainer selection without accepting a forged NPC or second account', async () => {
+    const payload = {
+      commandId: 'create-trainer',
+      playerAId: 2,
+      trainerPresetId: 'kanto-brock',
+    };
+    await expect(
+      service.create(actors[1], {
+        ...payload,
+        trainerPresetId: 'missing-trainer',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_TRAINER' });
+    await expect(
+      service.create(actors[1], { ...payload, playerBId: 3 }),
+    ).rejects.toMatchObject({ code: 'INVALID_PLAYERS' });
+    await expect(
+      service.create(actors[1], { ...payload, trainer: { team: [] } }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(service.create(actors[2], payload)).rejects.toMatchObject({
+      code: 'ADMIN_REQUIRED',
+    });
+    const battle = await service.create(actors[1], payload);
+    expect((await service.create(actors[1], payload)).battleId).toBe(
+      battle.battleId,
+    );
+    await expect(
+      service.create(actors[1], { ...payload, trainerPresetId: 'kanto-misty' }),
+    ).rejects.toMatchObject({ code: 'COMMAND_CONFLICT' });
+    await expect(
+      service.create(actors[5], {
+        commandId: 'pvp-overlap',
+        playerAId: 2,
+        playerBId: 3,
+      }),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    await expect(
+      service.create(actors[5], { ...payload, commandId: 'trainer-overlap' }),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    await service.cancel(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+    });
+    expect(
+      (
+        await service.create(actors[5], {
+          ...payload,
+          commandId: 'trainer-after-cancel',
+        })
+      ).lockedUserIds,
+    ).toEqual([2]);
+  });
+  it('rejects altered NPC levels, moves, HP and initial state before accepting a checkpoint', async () => {
+    const battle = await readyTrainer();
+    for (const change of [
+      (s: any) => s.teams.b.pokemons[0].pokemon.level++,
+      (s: any) => s.teams.b.pokemons[0].moves[0].id++,
+      (s: any) =>
+        s.teams.b.pokemons[0].pokemon.stats.find((stat) => stat.name === 'hp')
+          .value--,
+      (s: any) => s.teams.b.pokemons[0].statuses.push('burned'),
+      (s: any) => s.teams.b.pokemons[0].pokemon.battleStages.attack++,
+      (s: any) => (s.teams.b.name = 'Forged Trainer'),
+      (s: any) => (s.teams.b.activeCaptureId = s.teams.b.pokemons[1].captureId),
+    ]) {
+      const changed = session(battle);
+      change(changed);
+      await expect(
+        service.checkpoint(actors[1], {
+          battleId: battle.battleId,
+          hostEpoch: 1,
+          expectedCheckpointRevision: 0,
+          session: changed,
+          processedCommandIds: [],
+        }),
+      ).rejects.toThrow();
+    }
+    expect((await repo.get(battle.battleId)).checkpointRevision).toBe(0);
+    expect((await repo.get(battle.battleId)).lockHeld).toBe(true);
+  });
+  it('requires only the real player online and original device to resume Trainer battle', async () => {
+    const battle = await activeTrainer();
+    service.disconnect(actors[3].socketId);
+    const command = {
+      battleId: battle.battleId,
+      commandId: 'npc-choice',
+      side: 'b',
+      requestKey: requestKey(battle.session, 'b'),
+      choice: { kind: 'move', moveId: 1 },
+    };
+    const queued = await service.command(actors[1], command);
+    expect(queued.commands).toHaveLength(1);
+    service.disconnect(actors[2].socketId);
+    await expect(
+      service.checkpoint(actors[1], {
+        battleId: battle.battleId,
+        hostEpoch: 1,
+        expectedCheckpointRevision: 1,
+        session: battle.session,
+        processedCommandIds: ['npc-choice'],
+      }),
+    ).rejects.toMatchObject({ code: 'PLAYER_OFFLINE' });
+    const foreign = {
+      ...actors[2],
+      clientId: 'foreign-player-device',
+      socketId: 'foreign-player-socket',
+    };
+    service.connect(foreign);
+    await expect(
+      service.checkpoint(actors[1], {
+        battleId: battle.battleId,
+        hostEpoch: 1,
+        expectedCheckpointRevision: 1,
+        session: battle.session,
+        processedCommandIds: ['npc-choice'],
+      }),
+    ).rejects.toMatchObject({ code: 'PLAYER_OFFLINE' });
+    expect(
+      service.view(await repo.get(battle.battleId), actors[1]).players.a.online,
+    ).toBe(false);
+    service.connect(actors[2]);
+    const restarted = new PvpService(repo, auth as any);
+    [actors[1], actors[2]].forEach((actor) => restarted.connect(actor));
+    const restored = await restarted.sync(actors[1], {
+      battleId: battle.battleId,
+    });
+    expect(restored.state.session).toEqual(battle.session);
+    expect(restored.state.trainer.team).toEqual(battle.trainer.team);
+    expect(
+      (
+        await restarted.checkpoint(actors[1], {
+          battleId: battle.battleId,
+          hostEpoch: 1,
+          expectedCheckpointRevision: 1,
+          session: battle.session,
+          processedCommandIds: ['npc-choice'],
+        })
+      ).commands,
+    ).toEqual([]);
+  });
+  it('delivers a Trainer result only to its player and releases after that player saves once', async () => {
+    const battle = await activeTrainer();
+    const finished = clone(battle.session);
+    finished.phase = 'finished';
+    finished.runtime.ended = true;
+    finished.runtime.winner = 'b';
+    finished.runtime.serial++;
+    finished.teams.a.pokemons[0].pokemon.stats[0].value = 0;
+    await service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 1,
+      session: finished,
+      processedCommandIds: [],
+    });
+    service.disconnect(actors[2].socketId);
+    const finalizing = await service.finalize(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+    });
+    expect(finalizing.phase).toBe('finalizing');
+    expect(finalizing.lockHeld).toBe(true);
+    expect(Object.keys(finalizing.results)).toEqual(['a']);
+    expect(finalizing.results.a.outcome).toBe('lose');
+    expect(finalizing.results.a.patches[0].hp).toBe(0);
+    const result = finalizing.results.a;
+    const payload = {
+      battleId: battle.battleId,
+      resultId: result.resultId,
+      snapshotId: result.snapshotId,
+      baseHash: result.baseHash,
+    };
+    const foreign = {
+      ...actors[2],
+      clientId: 'foreign',
+      socketId: 'foreign-socket',
+    };
+    service.connect(foreign);
+    await expect(service.applied(foreign, payload)).rejects.toMatchObject({
+      code: 'OWNER_REQUIRED',
+    });
+    service.connect(actors[2]);
+    const completed = await service.applied(actors[2], payload);
+    expect(completed.phase).toBe('finalized');
+    expect(completed.lockHeld).toBe(false);
+    expect((await service.applied(actors[2], payload)).revision).toBe(
+      completed.revision,
+    );
+    expect(
+      (
+        await service.finalize(actors[1], {
+          battleId: battle.battleId,
+          hostEpoch: 1,
+        })
+      ).results,
+    ).toEqual(finalizing.results);
+    expect(await repo.locked()).toEqual([]);
+  });
+  it('accepts native Struggle for either side at zero PP without enabling exhausted ordinary moves', async () => {
+    let battle = await activeTrainer();
+    const exhausted = clone(battle.session);
+    exhausted.runtime.serial++;
+    for (const side of ['a', 'b']) {
+      exhausted.runtime.requests[side].moves = [
+        { id: 33, name: 'Tackle', pp: 0, maxpp: 35, disabled: false },
+        { id: 165, name: 'Struggle', pp: 0, maxpp: 0, disabled: false },
+      ];
+    }
+    battle = await service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 1,
+      session: exhausted,
+      processedCommandIds: [],
+    });
+    for (const side of ['a', 'b'] as const) {
+      const base = {
+        battleId: battle.battleId,
+        commandId: `struggle-${side}`,
+        side,
+        requestKey: requestKey(battle.session, side),
+      };
+      await expect(
+        service.command(actors[1], {
+          ...base,
+          choice: { kind: 'move', moveId: 33 },
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_CHOICE' });
+      await service.command(actors[1], {
+        ...base,
+        choice: { kind: 'move', moveId: 165 },
+      });
+    }
+    expect(
+      (await repo.get(battle.battleId)).commands.map((command) => [
+        command.side,
+        command.choice,
+      ]),
+    ).toEqual([
+      ['a', { kind: 'move', moveId: 165 }],
+      ['b', { kind: 'move', moveId: 165 }],
+    ]);
+  });
+  it('supports native locked recharge move zero but rejects it outside its forced request', async () => {
+    let battle = await activeTrainer();
+    const payload = {
+      battleId: battle.battleId,
+      commandId: 'recharge',
+      side: 'b',
+      requestKey: requestKey(battle.session, 'b'),
+      choice: { kind: 'move', moveId: 0 },
+    };
+    await expect(service.command(actors[1], payload)).rejects.toMatchObject({
+      code: 'INVALID_CHOICE',
+    });
+    const forced = clone(battle.session);
+    forced.runtime.serial++;
+    forced.runtime.requests.b.locked = true;
+    forced.runtime.requests.b.moves = [
+      { id: 0, name: 'Recharge', pp: 0, maxpp: 0, disabled: false },
+    ];
+    battle = await service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 1,
+      session: forced,
+      processedCommandIds: [],
+    });
+    const queued = await service.command(actors[1], {
+      ...payload,
+      requestKey: requestKey(battle.session, 'b'),
+    });
+    expect(queued.commands[0].choice).toEqual({ kind: 'move', moveId: 0 });
+    const pending = clone(forced);
+    pending.runtime.serial++;
+    pending.runtime.pending.b = { kind: 'move', moveId: 0 };
+    battle = await service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 2,
+      session: pending,
+      processedCommandIds: ['recharge'],
+    });
+    const invalid = clone(pending);
+    invalid.runtime.requests.b.locked = false;
+    await expect(
+      service.checkpoint(actors[1], {
+        battleId: battle.battleId,
+        hostEpoch: 1,
+        expectedCheckpointRevision: 3,
+        session: invalid,
+        processedCommandIds: [],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_CHECKPOINT' });
+    expect(battle.session.runtime.pending.b.moveId).toBe(0);
+  });
 });
 
 describe('Real PvP Socket.IO gateway with fake authoritative auth and memory durability', () => {
@@ -658,5 +1012,91 @@ describe('Real PvP Socket.IO gateway with fake authoritative auth and memory dur
         .code,
     ).toBe('SESSION_REVOKED');
     expect((await repo.get(created.state.battleId)).lockHeld).toBe(true);
+  });
+  it('transports a one-player Trainer battle and final result without an NPC socket or false owner', async () => {
+    const [admin, player, outsider] = await Promise.all([
+      connect(1),
+      connect(2),
+      connect(3),
+    ]);
+    const created = await ack(admin, 'pvp:create', {
+      commandId: 'socket-trainer',
+      playerAId: 2,
+      trainerPresetId: 'kanto-misty',
+    });
+    expect(created.ok).toBe(true);
+    expect(created.state.mode).toBe('trainer');
+    expect(created.state.players.b).toBeUndefined();
+    expect(
+      (
+        await ack(player, 'pvp:snapshot', {
+          snapshot: snapshot(created.state, 2, 'client-2'),
+        })
+      ).ok,
+    ).toBe(true);
+    const own = await ack(player, 'pvp:sync', {});
+    expect(own.state.phase).toBe('ready');
+    expect(own.state.trainer.name).toBe('Misty');
+    expect(own.state.trainer.team).toBeUndefined();
+    expect(own.state.session).toBeUndefined();
+    expect((await ack(outsider, 'pvp:sync', {})).state).toBeNull();
+    let battle = await repo.get(created.state.battleId);
+    expect(
+      (
+        await ack(admin, 'pvp:checkpoint', {
+          battleId: battle.battleId,
+          hostEpoch: 1,
+          expectedCheckpointRevision: 0,
+          session: session(battle),
+          processedCommandIds: [],
+        })
+      ).ok,
+    ).toBe(true);
+    battle = await repo.get(battle.battleId);
+    const forbidden = await ack(player, 'pvp:command', {
+      battleId: battle.battleId,
+      commandId: 'player-npc-choice',
+      side: 'b',
+      requestKey: requestKey(battle.session, 'b'),
+      choice: { kind: 'forfeit' },
+    });
+    expect(forbidden.error.code).toBe('HOST_REQUIRED');
+    const finished = clone(battle.session);
+    finished.phase = 'finished';
+    finished.runtime.ended = true;
+    finished.runtime.winner = 'a';
+    finished.runtime.serial++;
+    expect(
+      (
+        await ack(admin, 'pvp:checkpoint', {
+          battleId: battle.battleId,
+          hostEpoch: 1,
+          expectedCheckpointRevision: 1,
+          session: finished,
+          processedCommandIds: [],
+        })
+      ).ok,
+    ).toBe(true);
+    expect(
+      (
+        await ack(admin, 'pvp:finalize', {
+          battleId: battle.battleId,
+          hostEpoch: 1,
+        })
+      ).ok,
+    ).toBe(true);
+    const resultView = (await ack(player, 'pvp:sync', {})).state;
+    expect(resultView.phase).toBe('finalizing');
+    expect(resultView.result.outcome).toBe('win');
+    const result = resultView.result;
+    const applied = await ack(player, 'pvp:applied', {
+      battleId: battle.battleId,
+      resultId: result.resultId,
+      snapshotId: result.snapshotId,
+      baseHash: result.baseHash,
+    });
+    expect(applied.ok).toBe(true);
+    expect(applied.state.phase).toBe('finalized');
+    expect((await repo.get(battle.battleId)).lockHeld).toBe(false);
   });
 });
