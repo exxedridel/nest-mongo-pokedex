@@ -38,7 +38,7 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
 
 @WebSocketGateway({
   namespace: '/mensajes-prueba',
-  maxHttpBufferSize: 16 * 1024,
+  maxHttpBufferSize: 4 * 1024 * 1024,
   cors: {
     origin: (origin, callback) =>
       callback(null, isAllowedFrontendOrigin(origin)),

@@ -12,7 +12,14 @@ Si esta disponible, leer [la memoria compartida](../PROJECT_MEMORY.md). Este res
 Evaluar Nest como servicio de comunicacion en tiempo real. No concluir que sobra
 porque su catalogo HTTP no se consuma. El motor permanece en el panel admin.
 El alcance futuro confirmado son batallas PvP por instantaneas y resultados;
-persistir toda la partida en Nest no es un requisito. Batallas siguen pendientes.
+persistir toda la partida en Nest no es un requisito. PvP local ya implementado:
+PvpModule /pvp guarda SOLO documentos batalla en pvp_battles, reservas con indices
+unicos/CAS, checkpoints del motor admin, comandos y resultados pendientes. ADMIN
+controla ambos lados; jugador solo snapshot/vista propia/applied. No desbloquear
+por desconexion/timeout; liberar tras ambos guardados. Epoch cerca host antiguo.
+Buffer compartido Socket.IO 4MiB, validadores separados: chat texto1000chars,
+checkpoint2MiB/documento4MiB. Una replica. Ver README/PVP_PROTOCOL de workspace.
+test:pvp usa Memory/socket sinMongo; coleccion/indices reales faltan verificar.
 
 No guardar credenciales o tokens en la documentacion. Actualizar el contexto cuando el usuario confirme nuevos acuerdos.
 

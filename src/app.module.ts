@@ -9,10 +9,10 @@ import { SeedModule } from './seed/seed.module';
 import { EnvConfiguration } from './config/env.config';
 import { JoiValidationSchema } from './config/joi.validation';
 import { MessagesModule } from './messages/messages.module';
+import { PvpModule } from './pvp/pvp.module';
 
 @Module({
   imports: [
-
     ConfigModule.forRoot({
       load: [EnvConfiguration],
       validationSchema: JoiValidationSchema,
@@ -23,7 +23,7 @@ import { MessagesModule } from './messages/messages.module';
     }),
 
     MongooseModule.forRoot(process.env.MONGODB, {
-      dbName: 'pokemonsdb'
+      dbName: 'pokemonsdb',
     }),
 
     PokemonModule,
@@ -31,13 +31,12 @@ import { MessagesModule } from './messages/messages.module';
     CommonModule,
 
     MessagesModule,
+    PvpModule.forMongo(),
 
-    SeedModule
+    SeedModule,
   ],
 })
-
 export class AppModule {
-
   /* constructor() {
     console.log(process.env)
   } */

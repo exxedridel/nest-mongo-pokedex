@@ -1,0 +1,96 @@
+import { UserPublic } from '../messages/messages.types';
+
+export type Side = 'a' | 'b';
+export const SIDES: Side[] = ['a', 'b'];
+export type Phase =
+  | 'collecting'
+  | 'ready'
+  | 'active'
+  | 'finished'
+  | 'finalizing'
+  | 'finalized'
+  | 'cancelled';
+export type Choice =
+  | { kind: 'move'; moveId: number }
+  | { kind: 'switch'; captureId: string }
+  | { kind: 'wait' | 'cancel' | 'forfeit' };
+export type Capture = {
+  captureId: string;
+  pokemon: Record<string, any>;
+  statuses?: string[];
+  statusTurns?: Record<string, number>;
+  [key: string]: any;
+};
+export type Snapshot = {
+  version: 1;
+  battleId: string;
+  snapshotId: string;
+  userId: number;
+  clientId: string;
+  dataVersion: string;
+  baseHash: string;
+  pokemons: Capture[];
+  activeCaptureId: string;
+  hpMultiplier: number;
+};
+export type Command = {
+  commandId: string;
+  userId: number;
+  side: Side;
+  requestKey: string;
+  choice: Choice;
+};
+export type Result = {
+  battleId: string;
+  resultId: string;
+  userId: number;
+  snapshotId: string;
+  baseHash: string;
+  outcome: 'win' | 'lose' | 'draw';
+  patches: {
+    captureId: string;
+    hp: number;
+    statuses: string[];
+    statusTurns: Record<string, number>;
+  }[];
+};
+export type Actor = {
+  user: UserPublic;
+  clientId: string;
+  socketId: string;
+  token: string;
+};
+export type Battle = {
+  battleId: string;
+  creationKey: string;
+  creationHash: string;
+  phase: Phase;
+  revision: number;
+  checkpointRevision: number;
+  lockHeld: boolean;
+  lockedUserIds: number[];
+  adminId: number;
+  host: { userId: number; clientId: string; epoch: number };
+  players: Record<
+    Side,
+    { user: UserPublic; clientId: string; snapshot?: Snapshot }
+  >;
+  session: Record<string, any> | null;
+  commands: Command[];
+  commandHashes: Record<string, string>;
+  applied: Record<Side, boolean>;
+  results?: Record<Side, Result>;
+  lastCheckpoint?: { hash: string; expectedRevision: number; epoch: number };
+};
+export class PvpError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+export const fail = (code: string, message: string): never => {
+  throw new PvpError(code, message);
+};
+export const clone = <T>(value: T): T => structuredClone(value);

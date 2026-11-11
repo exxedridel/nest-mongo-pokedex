@@ -5,6 +5,62 @@ comunica las instancias React por Socket.IO. `/mensajes-prueba` permite elegir
 cualquier otro usuario registrado y conversar en privado. No hay una lista fija
 de dos correos. Esta etapa no incorpora sincronización de batallas.
 
+## Batallas PvP: namespace `/pvp`
+
+El administrador selecciona dos jugadores disponibles y maneja ambos equipos
+en React. Nest reserva sus identidades, recibe snapshots de 1–6 Pokémon y
+conserva el último checkpoint del motor y los resultados pendientes en Mongo.
+No calcula el combate ni reemplaza el guardado general de los jugadores.
+
+`PvpModule.forMongo()` crea `pvp_battles` e índices únicos parciales para impedir
+que un jugador o administrador figure en dos batallas reservadas. Los índices
+deben estar disponibles antes de aceptar operaciones. Las reservas de ambos
+jugadores viven en un documento y se actualizan mediante revisión/CAS; no se
+requieren transacciones Mongo entre documentos. Las escrituras se confirman
+después de guardar con journaling. No hay TTL que elimine batallas pendientes.
+
+Fases: `collecting → ready → active → finished → finalizing → finalized`.
+Solo collecting/ready pueden cancelarse. Los locks se liberan al cancelar o
+después de que ambos propietarios confirmen el guardado del resultado final.
+La desconexión, caducidad del JWT o reinicio no liberan las reservas. Se exige
+reconectar al propietario original; las discrepancias conservan el bloqueo.
+
+La autenticación reutiliza MySQL `/api/auth/me`. Cada operación y publicación
+revalida la identidad vigente. Solo el anfitrión admin puede encolar movimientos,
+cambios o rendición; los jugadores solo presentan su snapshot, observan su vista
+privada y confirman resultados. Un epoch de anfitrión y una revisión propia del
+checkpoint evitan escrituras antiguas. Los comandos se identifican y se guardan
+antes de confirmar su recepción; esa confirmación no equivale a su aplicación.
+
+El resultado individual limita cambios a HP y estados/contadores finales de las
+capturas originales. No entrega engine, equipo completo o decisiones pendientes
+del rival. Se guarda localmente junto con el recibo de resultado antes del ACK;
+los reintentos no deben volver a aplicar el cambio. Mongo conserva la entrega
+pendiente si el jugador se desconecta después de terminar el combate.
+
+El namespace usa el mismo puerto, origen y `/socket.io/` del chat. Como Nest
+comparte el servidor de transporte entre namespaces, el buffer de transporte
+es 4 MiB; los validadores mantienen el límite de texto del chat en 1000
+caracteres, checkpoint en 2 MiB y documento PvP en 4 MiB. La presencia se mantiene
+en el proceso: **una sola réplica Nest** en esta etapa. Un socket polling de un
+documento abandonado puede tardar hasta heartbeat en desaparecer de presencia;
+la sesión se revalida antes de operar o distribuir datos privados.
+
+Desplegar esta versión de Nest antes del frontend. Se usan las variables
+existentes; Mongo necesita permisos de colección e índices. No ejecutar el seed.
+El detalle de eventos y DTO compartido está en `../PVP_PROTOCOL.md` dentro del
+workspace. Cada repositorio conserva los tipos necesarios para su despliegue.
+
+```bash
+npm run test:pvp
+```
+
+Las pruebas usan un repositorio Memory y sockets reales: cubren reservas
+concurrentes, CAS/reinicio, privacidad, host antiguo, turnos, deduplicación,
+resultado inmutable y liberación posterior a ambos ACK. `PvpModule.withRepository`
+y `MemoryPvpRepository` permiten QA aislado sin iniciar Mongo. La colección y los
+índices reales deben comprobarse después en el entorno desplegado.
+
 ## Configurar antes de desplegar en Railway
 
 - `JWT_SECRET`: exactamente el mismo valor privado utilizado en `mysql-restapi`.

@@ -1,0 +1,9 @@
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": "..",
+  "testEnvironment": "node",
+  "testMatch": ["<rootDir>/test/pvp.e2e-spec.ts"],
+  "transform": { "^.+\\.(t|j)s$": "ts-jest" },
+  "testTimeout": 15000,
+  "maxWorkers": 1
+}

@@ -6,5 +6,6 @@ import { AuthIdentityService } from './auth-identity.service';
 @Module({
   imports: [ConfigModule],
   providers: [MessagesGateway, AuthIdentityService],
+  exports: [AuthIdentityService],
 })
 export class MessagesModule {}
