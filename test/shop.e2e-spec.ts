@@ -731,6 +731,190 @@ describe('Authoritative Pokedollars and purchases', () => {
   });
 });
 
+describe('Full Restore local inventory use', () => {
+  let auth: ReturnType<typeof fakeAuth>,
+    clients: Record<number, Actor>,
+    repo: MemoryShopRepository,
+    activity: PlayerActivityService,
+    service: ShopService,
+    pvp: PvpService;
+  const useInput = (overrides: Record<string, any> = {}) => ({
+    requestId: 'use-1',
+    captureId: 'capture-own',
+    context: 'party',
+    planHash: 'a'.repeat(64),
+    expectedWalletRevision: 0,
+    ...overrides,
+  });
+  beforeEach(async () => {
+    auth = fakeAuth();
+    clients = actors(auth);
+    repo = new MemoryShopRepository();
+    activity = new PlayerActivityService();
+    service = new ShopService(repo, auth as any, activity);
+    pvp = new PvpService(new MemoryPvpRepository(), auth as any, activity);
+    await pvp.onModuleInit();
+    await service.onModuleInit();
+    for (const actor of Object.values(clients)) {
+      service.connect(actor);
+      pvp.connect(actor);
+    }
+    await service.presence(clients[2], { ready: true, localBattle: false });
+    repo.rows.get(2).items = { 'full-restore': 2 };
+  });
+  it('decrements exactly one unit without changing money and replays one pending receipt before/after ACK', async () => {
+    const used = await service.use(clients[2], useInput());
+    expect(used.wallet).toMatchObject({
+      balance: 500,
+      revision: 1,
+      items: { 'full-restore': 1 },
+    });
+    expect(used.use).toMatchObject({
+      requestId: 'use-1',
+      itemId: 'full-restore',
+      captureId: 'capture-own',
+      context: 'party',
+      status: 'pending',
+      walletRevision: 1,
+    });
+    expect(await activity.busyUsers([2])).toEqual([2]);
+    expect((await service.use(clients[2], useInput())).wallet.revision).toBe(1);
+    const done = await service.useApplied(clients[2], {
+      requestId: 'use-1',
+      revision: 1,
+    });
+    expect(done.uses[0].status).toBe('applied');
+    expect(await activity.busyUsers([2])).toEqual([]);
+    expect(
+      (await service.use(clients[2], useInput())).wallet.items['full-restore'],
+    ).toBe(1);
+    expect((await repo.get(2)).uses).toHaveLength(1);
+  });
+  it('requires stock, exact revision, a player and a plan bound to one capture/context', async () => {
+    repo.rows.get(2).items = {};
+    await expect(service.use(clients[2], useInput())).rejects.toMatchObject({
+      code: 'ITEM_UNAVAILABLE',
+    });
+    repo.rows.get(2).items = { 'full-restore': 1 };
+    await expect(
+      service.use(clients[2], useInput({ expectedWalletRevision: 5 })),
+    ).rejects.toMatchObject({ code: 'WALLET_CONFLICT' });
+    await expect(service.use(clients[1], useInput())).rejects.toMatchObject({
+      code: 'PLAYER_REQUIRED',
+    });
+    await expect(
+      service.use(clients[2], useInput({ planHash: 'bad' })),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(
+      service.use(clients[2], useInput({ quantity: 2 })),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await service.use(clients[2], useInput());
+    await expect(
+      service.use(clients[2], useInput({ captureId: 'other' })),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+  });
+  it('validates local battle context and excludes every reserved network battle', async () => {
+    await expect(
+      service.use(clients[2], useInput({ context: 'local-battle' })),
+    ).rejects.toMatchObject({ code: 'PLAYER_IN_BATTLE' });
+    await service.presence(clients[2], { ready: false, localBattle: true });
+    await expect(service.use(clients[2], useInput())).rejects.toMatchObject({
+      code: 'PLAYER_IN_BATTLE',
+    });
+    await service.use(clients[2], useInput({ context: 'local-battle' }));
+    await service.useApplied(clients[2], { requestId: 'use-1', revision: 1 });
+    await service.presence(clients[2], { ready: true, localBattle: false });
+    await pvp.create(clients[1], {
+      commandId: 'create-1',
+      playerAId: 2,
+      trainerPresetId: 'kanto-brock',
+    });
+    await expect(
+      service.use(
+        clients[2],
+        useInput({ requestId: 'use-2', expectedWalletRevision: 1 }),
+      ),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+  });
+  it('pending usage blocks purchases, resets and battle reservation until original owner ACKs', async () => {
+    await service.use(clients[2], useInput());
+    await expect(
+      service.purchase(clients[1], input({ expectedWalletRevision: 1 })),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    await expect(
+      service.reset(clients[2], {
+        requestId: 'reset-1',
+        expectedWalletRevision: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    await expect(
+      pvp.create(clients[1], {
+        commandId: 'create-1',
+        playerAId: 2,
+        trainerPresetId: 'kanto-brock',
+      }),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    const foreign = {
+      ...clients[2],
+      socketId: 'other-socket',
+      clientId: 'other-client',
+    };
+    service.connect(foreign);
+    expect((await service.sync(foreign)).uses[0].status).toBe('pending');
+    await expect(
+      service.useApplied(foreign, { requestId: 'use-1', revision: 1 }),
+    ).rejects.toMatchObject({ code: 'OWNER_REQUIRED' });
+    service.disconnect(foreign.socketId);
+    await expect(
+      service.useApplied(clients[2], { requestId: 'use-1', revision: 99 }),
+    ).rejects.toMatchObject({ code: 'WALLET_CONFLICT' });
+    await service.useApplied(clients[2], { requestId: 'use-1', revision: 1 });
+  });
+  it('persists cancellation before a late use and cannot undo committed consumption', async () => {
+    const cancelled = await service.useCancel(clients[2], useInput());
+    expect(cancelled.use.status).toBe('cancelled');
+    expect(
+      (await service.use(clients[2], useInput())).wallet.items['full-restore'],
+    ).toBe(2);
+    expect((await service.sync(clients[2])).wallet.revision).toBe(0);
+    await expect(
+      service.useApplied(clients[2], { requestId: 'use-1', revision: 1 }),
+    ).rejects.toMatchObject({ code: 'ITEM_USE_CANCELLED' });
+    const second = useInput({ requestId: 'use-2' });
+    await service.use(clients[2], second);
+    expect((await service.useCancel(clients[2], second)).use.status).toBe(
+      'pending',
+    );
+    expect((await service.sync(clients[2])).wallet.items['full-restore']).toBe(
+      1,
+    );
+  });
+  it('keeps the pending use after restart and never consumes again after a lost reply', async () => {
+    await service.use(clients[2], useInput());
+    service = new ShopService(repo, auth as any, activity);
+    await service.onModuleInit();
+    service.connect(clients[2]);
+    const result = await service.use(clients[2], useInput());
+    expect(result.wallet.items['full-restore']).toBe(1);
+    expect(result.use.status).toBe('pending');
+    await service.useApplied(clients[2], { requestId: 'use-1', revision: 1 });
+    expect((await repo.get(2)).uses).toHaveLength(1);
+  });
+  it('fences a disconnect or local battle change during authentication before debit', async () => {
+    const original = auth.authenticate.bind(auth);
+    auth.authenticate = async (token) => {
+      const value = await original(token);
+      service.disconnect(clients[2].socketId);
+      return value;
+    };
+    await expect(service.use(clients[2], useInput())).rejects.toMatchObject({
+      code: 'SESSION_CHANGED',
+    });
+    expect((await repo.get(2)).items['full-restore']).toBe(2);
+    expect((await repo.get(2)).uses ?? []).toEqual([]);
+  });
+});
+
 describe('Shop Socket.IO authenticated namespace', () => {
   let app: INestApplication, auth: ReturnType<typeof fakeAuth>, rootUrl: string;
   const sockets: Socket[] = [];

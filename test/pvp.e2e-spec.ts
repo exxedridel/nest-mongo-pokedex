@@ -6,6 +6,9 @@ import {
   MessageAuthError,
 } from '../src/messages/auth-identity.service';
 import { PvpModule } from '../src/pvp/pvp.module';
+import { ShopService } from '../src/shop/shop.service';
+import { MemoryShopRepository } from '../src/shop/shop.repository';
+import { PlayerActivityService } from '../src/messages/player-activity.service';
 import {
   MemoryPvpRepository,
   PvpBattleSchema,
@@ -1098,5 +1101,183 @@ describe('Real PvP Socket.IO gateway with fake authoritative auth and memory dur
     expect(applied.ok).toBe(true);
     expect(applied.state.phase).toBe('finalized');
     expect((await repo.get(battle.battleId)).lockHeld).toBe(false);
+  });
+});
+describe('Full Restore battle inventory settlement', () => {
+  let repo: MemoryPvpRepository,
+    wallets: MemoryShopRepository,
+    shop: ShopService,
+    pvp: PvpService;
+  let actors: Record<number, Actor>, battle: Battle;
+  beforeEach(async () => {
+    const auth = fakeAuth();
+    const activity = new PlayerActivityService();
+    repo = new MemoryPvpRepository();
+    wallets = new MemoryShopRepository();
+    shop = new ShopService(wallets, auth as any, activity);
+    pvp = new PvpService(repo, auth as any, activity, shop);
+    await shop.onModuleInit();
+    await pvp.onModuleInit();
+    actors = Object.fromEntries(
+      [...auth.users.values()].map((user) => [
+        user.id,
+        {
+          user: clone(user),
+          clientId: `client-${user.id}`,
+          socketId: `socket-${user.id}`,
+          token: `test-user-${user.id}`,
+        },
+      ]),
+    ) as any;
+    for (const actor of Object.values(actors)) {
+      shop.connect(actor);
+      pvp.connect(actor);
+    }
+    for (const userId of [2, 3]) {
+      await shop.presence(actors[userId], { ready: true, localBattle: false });
+      wallets.rows.get(userId).items['full-restore'] = 2;
+    }
+    battle = await pvp.create(actors[1], {
+      commandId: 'inventory-battle',
+      playerAId: 2,
+      playerBId: 3,
+    });
+    for (const userId of [2, 3])
+      await pvp.snapshot(actors[userId], {
+        snapshot: snapshot(battle, userId, actors[userId].clientId),
+      });
+    battle = await repo.get(battle.battleId);
+    battle = await pvp.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 0,
+      session: session(battle),
+      processedCommandIds: [],
+    });
+  });
+  async function item() {
+    return pvp.command(actors[1], {
+      battleId: battle.battleId,
+      commandId: 'restore-action',
+      side: 'a',
+      requestKey: requestKey(battle.session, 'a'),
+      choice: {
+        kind: 'item',
+        item: 'full-restore',
+        captureId: battle.session.teams.a.activeCaptureId,
+      },
+    });
+  }
+  function checkpoint(input: Battle, used: string[], pending = false) {
+    const next = clone(input.session);
+    next.networkItems = {
+      pending: pending
+        ? {
+            a: {
+              commandId: 'restore-action',
+              captureId: next.teams.a.activeCaptureId,
+            },
+          }
+        : {},
+      used,
+    };
+    next.runtime.pending = pending
+      ? {
+          a: {
+            kind: 'item',
+            item: 'full-restore',
+            captureId: next.teams.a.activeCaptureId,
+          },
+        }
+      : {};
+    next.runtime.serial++;
+    return {
+      battleId: input.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: input.checkpointRevision,
+      session: next,
+      processedCommandIds: input.commands.map((c) => c.commandId),
+    };
+  }
+  it('reserves a legal choice without debit, then charges once on effect checkpoint and survives replay', async () => {
+    const queued = await item();
+    expect(queued.commands[0].inventoryAuthorized).toBe(true);
+    expect(await shop.fullRestoreStock(2)).toBe(2);
+    const payload = checkpoint(queued, ['restore-action']);
+    const done = await pvp.checkpoint(actors[1], payload);
+    expect(done.inventory.a).toBe(1);
+    expect(await shop.fullRestoreStock(2)).toBe(1);
+    await pvp.checkpoint(actors[1], payload);
+    expect(await shop.fullRestoreStock(2)).toBe(1);
+    expect(wallets.rows.get(2).battleUses).toHaveLength(1);
+    expect(wallets.rows.get(2).balance).toBe(500);
+  });
+  it('a pending choice cancelled before execution never consumes a unit', async () => {
+    const selected = await pvp.checkpoint(
+      actors[1],
+      checkpoint(await item(), [], true),
+    );
+    const cancelled = await pvp.command(actors[1], {
+      battleId: battle.battleId,
+      commandId: 'cancel-item',
+      side: 'a',
+      requestKey: requestKey(selected.session, 'a'),
+      choice: { kind: 'cancel' },
+    });
+    await pvp.checkpoint(actors[1], checkpoint(cancelled, []));
+    expect(await shop.fullRestoreStock(2)).toBe(2);
+  });
+  it('recovering after wallet debit and a failed checkpoint write does not debit again', async () => {
+    const queued = await item(),
+      payload = checkpoint(queued, ['restore-action']);
+    const cas = repo.compareAndSwap.bind(repo);
+    let failCommit = true;
+    repo.compareAndSwap = async (next, rev) => {
+      if (
+        failCommit &&
+        next.session?.networkItems?.used?.includes('restore-action') &&
+        !next.pendingInventoryCheckpoint
+      ) {
+        failCommit = false;
+        throw new Error('simulated checkpoint write failure');
+      }
+      return cas(next, rev);
+    };
+    await expect(pvp.checkpoint(actors[1], payload)).rejects.toThrow(
+      'simulated',
+    );
+    expect(await shop.fullRestoreStock(2)).toBe(1);
+    expect(
+      (await repo.get(battle.battleId)).pendingInventoryCheckpoint,
+    ).toBeDefined();
+    const resumed = await pvp.sync(actors[1], { battleId: battle.battleId });
+    expect(resumed.state.session.networkItems.used).toEqual(['restore-action']);
+    expect(await shop.fullRestoreStock(2)).toBe(1);
+    expect(
+      (await repo.get(battle.battleId)).pendingInventoryCheckpoint,
+    ).toBeUndefined();
+  });
+  it('rejects zero stock and invented inventory receipts', async () => {
+    await repo.compareAndSwap(
+      { ...battle, inventory: { a: 0, b: 2 }, revision: battle.revision + 1 },
+      battle.revision,
+    );
+    await expect(item()).rejects.toMatchObject({ code: 'ITEM_UNAVAILABLE' });
+    await expect(
+      pvp.checkpoint(
+        actors[1],
+        checkpoint(await repo.get(battle.battleId), ['invented']),
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_CHECKPOINT' });
+    expect(await shop.fullRestoreStock(2)).toBe(2);
+  });
+  it('keeps unusual command IDs as data across persistence and inventory settlement', async () => {
+    const queued = await pvp.command(actors[1], {
+      battleId: battle.battleId, commandId: '__proto__', side: 'a',
+      requestKey: requestKey(battle.session, 'a'),
+      choice: { kind: 'item', item: 'full-restore', captureId: battle.session.teams.a.activeCaptureId },
+    });
+    await pvp.checkpoint(actors[1], checkpoint(queued, ['__proto__']));
+    expect(await shop.fullRestoreStock(2)).toBe(1);
   });
 });

@@ -353,6 +353,11 @@ export function validateChoice(value: any): Choice {
   } else if (value.kind === 'switch') {
     object(value, ['kind', 'captureId']);
     id(value.captureId);
+  } else if (value.kind === 'item') {
+    object(value, ['kind', 'item', 'captureId']);
+    if (value.item !== 'full-restore')
+      fail('INVALID_CHOICE', 'Objeto no disponible.');
+    id(value.captureId);
   } else if (['wait', 'cancel', 'forfeit'].includes(value.kind))
     object(value, ['kind']);
   else fail('INVALID_CHOICE', 'Acción PvP no válida.');
@@ -391,6 +396,7 @@ export function validateSession(session: any, battle: Battle) {
     'weather',
     'runtime',
     'history',
+    'networkItems',
   ]);
   size(session, 2 * 1024 * 1024);
   if (

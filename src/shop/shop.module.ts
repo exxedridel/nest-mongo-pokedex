@@ -1,4 +1,4 @@
-import { DynamicModule, Module } from '@nestjs/common';
+import { DynamicModule, Global, Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { MessagesModule } from '../messages/messages.module';
 import { ShopGateway } from './shop.gateway';
@@ -11,6 +11,7 @@ import {
   ShopWalletSchema,
 } from './shop.repository';
 
+@Global()
 @Module({
   imports: [MessagesModule],
   providers: [ShopService, ShopGateway],

@@ -37,6 +37,9 @@ export const PvpBattleSchema = new Schema(
     applied: Schema.Types.Mixed,
     results: Schema.Types.Mixed,
     lastCheckpoint: Schema.Types.Mixed,
+    inventory: Schema.Types.Mixed,
+    itemCommands: Schema.Types.Mixed,
+    pendingInventoryCheckpoint: Schema.Types.Mixed,
   },
   {
     collection: 'pvp_battles',

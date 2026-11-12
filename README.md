@@ -19,7 +19,7 @@ Sólo una cuenta admin vigente puede comprar. El servidor decide el precio a
 partir del catálogo; rechaza saldos/precios enviados por el cliente, cantidades
 fuera de 1–99, fondos insuficientes y revisiones antiguas. Comprar guarda saldo,
 cantidades y recibo en **una única escritura CAS** con journaling; el uso de los
-objetos queda para una etapa posterior.
+otros objetos queda para una etapa posterior; Full Restore sí se consume.
 
 Antes de cobrar, `shop:prepare` solicita al navegador seleccionado que confirme
 que está fuera de batalla y guarde una reserva local. El ACK tiene cinco segundos
@@ -61,6 +61,27 @@ navegadores de esa cuenta para que vuelvan al propietario original.
 devuelve ese mismo resultado: cancelar no revierte un reinicio confirmado.
 La cancelación impide ejecutar después una copia retrasada de la solicitud.
 Reintentar el mismo ID nunca repone fondos ni vuelve a borrar la partida.
+
+### Uso de Full Restore
+
+`shop:use {requestId,captureId,context,planHash,expectedWalletRevision}` consume
+una unidad de la Bag del propio jugador, con contexto `party` o `local-battle`.
+Exige sesión/navegador vigentes, revisión exacta, existencias y ausencia de otra
+operación o batalla reservada. Persiste wallet y recibo `pending` en un CAS.
+`shop:use-applied {requestId,revision}` confirma que el dispositivo guardó el plan;
+`shop:use-cancel` recibe el payload original y persiste `cancelled` si todavía
+no se consumió. Los pendientes bloquean compras, reinicios y reservas de batalla.
+
+En `/pvp`, sólo se aceptan elecciones item de los humanos con stock. Elegirlo
+reserva la acción sin descontar la unidad. El adaptador admin registra el comando
+cuando se ejecuta el evento nativo; el checkpoint identifica esos comandos en
+`networkItems.used`. Nest valida su pertenencia y persiste un checkpoint pendiente
+antes de debitar cada wallet por clave batalla/comando. Al terminar el débito
+confirma el checkpoint. Sync reanuda ese registro tras fallos, sin doble consumo.
+Cancelar o terminar por rendición antes de ejecutar el objeto no consume.
+
+Los campos nuevos son opcionales para wallets/batallas anteriores. No ejecutar
+seed ni borrar reservas. El motor, HP y RNG siguen calculándose en React.
 
 La presencia y la exclusión entre namespaces requieren **una sola réplica Nest**.
 Desplegar **Nest primero y React después**, conservando las variables existentes.

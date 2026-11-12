@@ -13,6 +13,7 @@ export type Phase =
 export type Choice =
   | { kind: 'move'; moveId: number }
   | { kind: 'switch'; captureId: string }
+  | { kind: 'item'; item: 'full-restore'; captureId: string }
   | { kind: 'wait' | 'cancel' | 'forfeit' };
 export type Capture = {
   captureId: string;
@@ -39,6 +40,7 @@ export type Command = {
   side: Side;
   requestKey: string;
   choice: Choice;
+  inventoryAuthorized?: true;
 };
 export type Result = {
   battleId: string;
@@ -99,6 +101,19 @@ export type Battle = {
   applied: Record<Side, boolean>;
   results?: Partial<Record<Side, Result>>;
   lastCheckpoint?: { hash: string; expectedRevision: number; epoch: number };
+  inventory?: Partial<Record<Side, number>>;
+  itemCommands?: Record<
+    string,
+    { commandId: string; side: Side; captureId: string; requestKey: string }
+  >;
+  pendingInventoryCheckpoint?: {
+    session: Record<string, any>;
+    processedCommandIds: string[];
+    expectedRevision: number;
+    epoch: number;
+    fingerprint: string;
+    charges: { commandId: string; userId: number; side: Side }[];
+  };
 };
 export const humanSides = (battle: Battle): Side[] =>
   battle.mode === 'trainer' ? ['a'] : SIDES;

@@ -2,11 +2,13 @@ import { Inject, Injectable, OnModuleInit, Optional } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { AuthIdentityService } from '../messages/auth-identity.service';
 import { PlayerActivityService } from '../messages/player-activity.service';
+import { ShopService } from '../shop/shop.service';
 import { PVP_REPOSITORY, PvpRepository } from './pvp.repository';
 import {
   Actor,
   Battle,
   clone,
+  Command,
   fail,
   humanSides,
   Result,
@@ -36,6 +38,7 @@ export class PvpService implements OnModuleInit {
     @Inject(PVP_REPOSITORY) readonly repository: PvpRepository,
     private readonly auth: AuthIdentityService,
     @Optional() private readonly activity?: PlayerActivityService,
+    @Optional() private readonly shop?: ShopService,
   ) {}
   async onModuleInit() {
     await this.repository.ready();
@@ -118,6 +121,144 @@ export class PvpService implements OnModuleInit {
       }
     }
   }
+  private async recoverInventoryCheckpoint(initial: Battle): Promise<Battle> {
+    let battle = initial;
+    if (!battle.inventory && this.shop) {
+      for (let attempt = 0; attempt < 20 && !battle.inventory; attempt++) {
+        const previous = battle.revision;
+        const next = clone(battle);
+        next.inventory = {};
+        for (const side of humanSides(battle))
+          next.inventory[side] = await this.shop.fullRestoreStock(
+            battle.players[side].user.id,
+          );
+        next.revision++;
+        if (await this.repository.compareAndSwap(next, previous)) battle = next;
+        else battle = await this.repository.get(battle.battleId);
+      }
+    }
+    for (
+      let attempt = 0;
+      attempt < 20 && battle.pendingInventoryCheckpoint;
+      attempt++
+    ) {
+      if (!this.shop)
+        fail('INVENTORY_UNAVAILABLE', 'No está disponible el inventario.');
+      const outbox = battle.pendingInventoryCheckpoint;
+      for (const charge of outbox.charges)
+        await this.shop.consumeBattleFullRestore(
+          charge.userId,
+          battle.battleId,
+          charge.commandId,
+        );
+      const previous = battle.revision;
+      const next = clone(battle);
+      next.session = clone(outbox.session);
+      next.commands = next.commands.filter(
+        (command) => !outbox.processedCommandIds.includes(command.commandId),
+      );
+      next.checkpointRevision++;
+      next.lastCheckpoint = {
+        hash: outbox.fingerprint,
+        expectedRevision: outbox.expectedRevision,
+        epoch: outbox.epoch,
+      };
+      next.phase =
+        next.session.phase === 'finished'
+          ? 'finished'
+          : next.session.phase === 'battle'
+            ? 'active'
+            : 'ready';
+      for (const charge of outbox.charges)
+        next.inventory[charge.side] = (next.inventory[charge.side] ?? 0) - 1;
+      delete next.pendingInventoryCheckpoint;
+      next.revision++;
+      if (await this.repository.compareAndSwap(next, previous)) battle = next;
+      else battle = await this.repository.get(battle.battleId);
+    }
+    if (battle.pendingInventoryCheckpoint)
+      fail(
+        'INVENTORY_PENDING',
+        'El consumo del turno sigue pendiente. Actualiza la conexión.',
+      );
+    return battle;
+  }
+  private inventoryCharges(battle: Battle, session: any, processed: string[]) {
+    const metadata = session.networkItems ?? { pending: {}, used: [] };
+    object(metadata, ['pending', 'used']);
+    object(metadata.pending, SIDES);
+    if (
+      !Array.isArray(metadata.used) ||
+      metadata.used.length > 8192 ||
+      new Set(metadata.used).size !== metadata.used.length
+    )
+      fail('INVALID_CHECKPOINT', 'Recibos de objetos no válidos.');
+    metadata.used.forEach(id);
+    const previous = battle.session?.networkItems ?? { pending: {}, used: [] };
+    if (previous.used.some((key: string) => !metadata.used.includes(key)))
+      fail(
+        'INVALID_CHECKPOINT',
+        'Los objetos ejecutados no pueden retroceder.',
+      );
+    const known = (key: string) => {
+      const entry = battle.itemCommands?.[digest(key)];
+      if (!entry || !humanSides(battle).includes(entry.side))
+        fail('INVALID_CHECKPOINT', 'El objeto no tiene una acción autorizada.');
+      const alreadyPending = previous.pending[entry.side]?.commandId === key;
+      if (
+        !previous.used.includes(key) &&
+        !alreadyPending &&
+        !processed.includes(key)
+      )
+        fail(
+          'INVALID_CHECKPOINT',
+          'El objeto no corresponde a una acción procesada.',
+        );
+      return entry;
+    };
+    for (const side of SIDES) {
+      const pending = metadata.pending[side];
+      const choice = session.runtime?.pending[side];
+      if (pending) {
+        object(pending, ['commandId', 'captureId']);
+        id(pending.commandId);
+        id(pending.captureId);
+        const entry = known(pending.commandId);
+        if (
+          entry.side !== side ||
+          entry.captureId !== pending.captureId ||
+          metadata.used.includes(entry.commandId) ||
+          choice?.kind !== 'item' ||
+          choice.captureId !== entry.captureId
+        )
+          fail(
+            'INVALID_CHECKPOINT',
+            'El objeto pendiente no coincide con su equipo.',
+          );
+      } else if (choice?.kind === 'item')
+        fail(
+          'INVALID_CHECKPOINT',
+          'El objeto pendiente carece de autorización.',
+        );
+    }
+    const charges: { commandId: string; userId: number; side: Side }[] = [];
+    for (const key of metadata.used) {
+      const entry = known(key);
+      if (!previous.used.includes(key))
+        charges.push({
+          commandId: key,
+          side: entry.side,
+          userId: battle.players[entry.side].user.id,
+        });
+    }
+    for (const side of SIDES)
+      if (
+        charges.filter((charge) => charge.side === side).length >
+        (battle.inventory?.[side] ?? 0)
+      )
+        fail('ITEM_UNAVAILABLE', 'El jugador no tiene Full Restore en la Bag.');
+    return charges;
+  }
   private async load(battleId: string, actor: Actor): Promise<Battle> {
     const battle = await this.repository.get(id(battleId));
     if (!battle)
@@ -126,7 +267,7 @@ export class PvpService implements OnModuleInit {
         'No se encontró la batalla; conserva el bloqueo local.',
       );
     this.member(battle, actor);
-    return battle;
+    return this.recoverInventoryCheckpoint(battle);
   }
   private async mutate(
     battleId: string,
@@ -207,6 +348,7 @@ export class PvpService implements OnModuleInit {
       state.trainer = admin ? clone(battle.trainer) : clone(descriptor);
     }
     if (admin) {
+      state.inventory = clone(battle.inventory ?? {});
       state.session = clone(battle.session);
       state.commands = clone(battle.commands);
       return state;
@@ -230,12 +372,13 @@ export class PvpService implements OnModuleInit {
   }
   async sync(actor: Actor, payload: any) {
     object(payload, ['battleId']);
-    const battle = payload.battleId
+    let battle = payload.battleId
       ? await this.load(payload.battleId, actor)
       : (await this.repository.locked()).find(
           (entry) =>
             entry.adminId === actor.user.id || this.ownSide(entry, actor),
         );
+    if (battle) battle = await this.recoverInventoryCheckpoint(battle);
     return {
       ok: true,
       state: battle ? this.view(battle, actor) : null,
@@ -390,7 +533,7 @@ export class PvpService implements OnModuleInit {
       fail('INVALID_CHOICE', 'Acción de turno no válida.');
     return this.mutate(payload.battleId, actor, async (battle) => {
       this.host(battle, actor);
-      const command = {
+      const command: Command = {
         commandId: payload.commandId,
         userId: actor.user.id,
         side: payload.side as Side,
@@ -417,6 +560,30 @@ export class PvpService implements OnModuleInit {
       const team = battle.session.teams[payload.side];
       const request = battle.session.runtime.requests[payload.side];
       const pending = Boolean(battle.session.runtime.pending[payload.side]);
+      if (choice.kind === 'item') {
+        if (!this.shop || !humanSides(battle).includes(payload.side))
+          fail(
+            'INVENTORY_UNAVAILABLE',
+            'Sólo los jugadores pueden utilizar su Bag.',
+          );
+        if (
+          request.forceSwitch ||
+          request.locked ||
+          !team.pokemons.some(
+            (capture: any) => capture.captureId === choice.captureId,
+          )
+        )
+          fail(
+            'INVALID_CHOICE',
+            'No se puede usar Full Restore en ese objetivo o turno.',
+          );
+        if ((battle.inventory?.[payload.side] ?? 0) < 1)
+          fail(
+            'ITEM_UNAVAILABLE',
+            'El jugador no tiene Full Restore en su Bag.',
+          );
+        command.inventoryAuthorized = true;
+      }
       if (choice.kind === 'cancel') {
         if (!pending)
           fail('INVALID_CHOICE', 'No hay una elección pendiente que cancelar.');
@@ -478,6 +645,13 @@ export class PvpService implements OnModuleInit {
         fail('COMMAND_LIMIT', 'La cola de acciones alcanzó su límite.');
       battle.commands.push(clone(command));
       battle.commandHashes[key] = hash;
+      if (choice.kind === 'item')
+        (battle.itemCommands ??= {})[digest(command.commandId)] = {
+          commandId: command.commandId,
+          side: command.side,
+          captureId: choice.captureId,
+          requestKey: command.requestKey,
+        };
     });
   }
   async checkpoint(actor: Actor, payload: any) {
@@ -499,57 +673,80 @@ export class PvpService implements OnModuleInit {
       fail('INVALID_CHECKPOINT', 'Identificadores procesados no válidos.');
     payload.processedCommandIds.forEach(id);
     const fingerprint = digest([payload.session, payload.processedCommandIds]);
-    return this.mutate(payload.battleId, actor, async (battle) => {
-      this.host(battle, actor, payload.hostEpoch);
-      if (
-        battle.lastCheckpoint?.hash === fingerprint &&
-        battle.lastCheckpoint.expectedRevision ===
-          payload.expectedCheckpointRevision &&
-        battle.lastCheckpoint.epoch === payload.hostEpoch
-      )
-        return false;
-      if (!['ready', 'active'].includes(battle.phase))
-        fail('INVALID_PHASE', 'No se puede avanzar esta batalla.');
-      if (battle.checkpointRevision !== payload.expectedCheckpointRevision)
-        fail('CHECKPOINT_CONFLICT', 'Otro checkpoint ya fue guardado.');
-      await this.ownersOnline(battle);
-      validateSession(payload.session, battle);
-      if (
-        payload.processedCommandIds.some(
-          (commandId) =>
-            !battle.commands.some((command) => command.commandId === commandId),
+    const result = await this.mutate(
+      payload.battleId,
+      actor,
+      async (battle) => {
+        this.host(battle, actor, payload.hostEpoch);
+        if (
+          battle.lastCheckpoint?.hash === fingerprint &&
+          battle.lastCheckpoint.expectedRevision ===
+            payload.expectedCheckpointRevision &&
+          battle.lastCheckpoint.epoch === payload.hostEpoch
         )
-      )
-        fail(
-          'INVALID_CHECKPOINT',
-          'El checkpoint confirma acciones desconocidas.',
+          return false;
+        if (!['ready', 'active'].includes(battle.phase))
+          fail('INVALID_PHASE', 'No se puede avanzar esta batalla.');
+        if (battle.checkpointRevision !== payload.expectedCheckpointRevision)
+          fail('CHECKPOINT_CONFLICT', 'Otro checkpoint ya fue guardado.');
+        await this.ownersOnline(battle);
+        validateSession(payload.session, battle);
+        if (
+          payload.processedCommandIds.some(
+            (commandId) =>
+              !battle.commands.some(
+                (command) => command.commandId === commandId,
+              ),
+          )
+        )
+          fail(
+            'INVALID_CHECKPOINT',
+            'El checkpoint confirma acciones desconocidas.',
+          );
+        if (
+          battle.session?.runtime &&
+          payload.session.runtime &&
+          (payload.session.runtime.serial < battle.session.runtime.serial ||
+            payload.session.runtime.turn < battle.session.runtime.turn)
+        )
+          fail('INVALID_CHECKPOINT', 'El motor no puede retroceder.');
+        if (battle.phase === 'active' && payload.session.phase === 'setup')
+          fail('INVALID_CHECKPOINT', 'No se puede volver a preparación.');
+        const charges = this.inventoryCharges(
+          battle,
+          payload.session,
+          payload.processedCommandIds,
         );
-      if (
-        battle.session?.runtime &&
-        payload.session.runtime &&
-        (payload.session.runtime.serial < battle.session.runtime.serial ||
-          payload.session.runtime.turn < battle.session.runtime.turn)
-      )
-        fail('INVALID_CHECKPOINT', 'El motor no puede retroceder.');
-      if (battle.phase === 'active' && payload.session.phase === 'setup')
-        fail('INVALID_CHECKPOINT', 'No se puede volver a preparación.');
-      battle.session = clone(payload.session);
-      battle.commands = battle.commands.filter(
-        (command) => !payload.processedCommandIds.includes(command.commandId),
-      );
-      battle.checkpointRevision++;
-      battle.lastCheckpoint = {
-        hash: fingerprint,
-        expectedRevision: payload.expectedCheckpointRevision,
-        epoch: payload.hostEpoch,
-      };
-      battle.phase =
-        payload.session.phase === 'finished'
-          ? 'finished'
-          : payload.session.phase === 'battle'
-            ? 'active'
-            : 'ready';
-    });
+        if (charges.length) {
+          battle.pendingInventoryCheckpoint = {
+            session: clone(payload.session),
+            processedCommandIds: clone(payload.processedCommandIds),
+            expectedRevision: payload.expectedCheckpointRevision,
+            epoch: payload.hostEpoch,
+            fingerprint,
+            charges,
+          };
+          return;
+        }
+        battle.session = clone(payload.session);
+        battle.commands = battle.commands.filter(
+          (command) => !payload.processedCommandIds.includes(command.commandId),
+        );
+        battle.checkpointRevision++;
+        battle.lastCheckpoint = {
+          hash: fingerprint,
+          expectedRevision: payload.expectedCheckpointRevision,
+          epoch: payload.hostEpoch,
+        };
+        battle.phase =
+          payload.session.phase === 'finished'
+            ? 'finished'
+            : payload.session.phase === 'battle'
+              ? 'active'
+              : 'ready';
+      },
+    );
+    return this.recoverInventoryCheckpoint(result);
   }
   async finalize(actor: Actor, payload: any) {
     object(payload, ['battleId', 'hostEpoch']);

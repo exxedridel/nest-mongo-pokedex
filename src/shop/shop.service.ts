@@ -9,6 +9,7 @@ import {
   clone,
   fail,
   GameReset,
+  ItemUse,
   Purchase,
   purchaseView,
   resetView,
@@ -17,6 +18,7 @@ import {
   ShopItemId,
   ShopPlayer,
   ShopState,
+  useView,
   WalletRecord,
   walletView,
 } from './shop.types';
@@ -70,10 +72,42 @@ export class ShopService implements OnModuleInit {
         .filter(
           (row) =>
             row?.purchases.some((purchase) => purchase.status === 'pending') ||
-            row?.resets?.some((reset) => reset.status === 'pending'),
+            row?.resets?.some((reset) => reset.status === 'pending') ||
+            row?.uses?.some((use) => use.status === 'pending'),
         )
         .map((row) => row.userId);
     });
+  }
+  async fullRestoreStock(userId: number): Promise<number> {
+    return (await this.repository.get(userId))?.items['full-restore'] ?? 0;
+  }
+  /** Called only for a durable, authorized battle checkpoint outbox. */
+  async consumeBattleFullRestore(
+    userId: number,
+    battleId: string,
+    commandId: string,
+  ) {
+    const key = digest([battleId, commandId]);
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const row = await this.repository.get(userId);
+      if (!row)
+        fail('INVENTORY_UNAVAILABLE', 'No se encontró la Bag del jugador.');
+      if (row.battleUses?.some((use) => use.key === key)) return;
+      if ((row.items['full-restore'] ?? 0) < 1)
+        fail(
+          'INSUFFICIENT_ITEMS',
+          'No quedan Full Restore para completar esta acción.',
+        );
+      const previous = row.storageRevision;
+      row.items['full-restore']--;
+      row.revision++;
+      row.storageRevision++;
+      (row.battleUses ??= []).push({ key, battleId, commandId });
+      if (!(await this.repository.compareAndSwap(row, previous))) continue;
+      this.activity.changed();
+      return;
+    }
+    fail('WALLET_CONFLICT', 'No se pudo confirmar el consumo de Full Restore.');
   }
   connect(actor: Actor) {
     const previous = this.actors.get(actor.socketId);
@@ -115,6 +149,7 @@ export class ShopService implements OnModuleInit {
       items: {},
       purchases: [],
       resets: [],
+      uses: [],
     };
     if (await this.repository.insert(initial)) {
       this.activity.changed();
@@ -174,6 +209,12 @@ export class ShopService implements OnModuleInit {
         ]
           .sort((left, right) => left.walletRevision - right.walletRevision)
           .map(resetView),
+        uses: [
+          ...(row.uses ?? []).filter((use) => use.status === 'pending'),
+          ...(row.uses ?? [])
+            .filter((use) => use.status !== 'pending')
+            .slice(-50),
+        ].map(useView),
       };
     }
     this.admin(actor);
@@ -214,6 +255,9 @@ export class ShopService implements OnModuleInit {
       const pendingReset = !!wallet?.resets?.some(
         (reset) => reset.status === 'pending',
       );
+      const pendingUse = !!wallet?.uses?.some(
+        (use) => use.status === 'pending',
+      );
       players.push({
         user: clone(valid.user),
         clientId: candidate.clientId,
@@ -221,8 +265,9 @@ export class ShopService implements OnModuleInit {
         ready: current.ready,
         inBattle: current.localBattle || busy.has(candidate.user.id),
         wallet: wallet ? walletView(wallet) : null,
-        pending: pending || pendingReset,
+        pending: pending || pendingReset || pendingUse,
         pendingReset,
+        pendingUse,
       });
     }
     const rows = await this.repository.forAdmin(actor.user.id);
@@ -500,6 +545,251 @@ export class ShopService implements OnModuleInit {
       fail(
         'WALLET_CONFLICT',
         'No se pudo confirmar el guardado. Sincroniza y reintenta.',
+      );
+    });
+    return this.sync(actor, {});
+  }
+
+  private itemUseRequest(actor: Actor, payload: any): string {
+    object(payload, [
+      'requestId',
+      'captureId',
+      'context',
+      'planHash',
+      'expectedWalletRevision',
+    ]);
+    id(payload.requestId);
+    id(payload.captureId);
+    integer(payload.expectedWalletRevision);
+    if (
+      !['party', 'local-battle'].includes(payload.context) ||
+      typeof payload.planHash !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(payload.planHash)
+    )
+      fail('INVALID_INPUT', 'El plan de uso de Full Restore no es válido.');
+    this.self(actor);
+    if (actor.user.role !== 'player')
+      fail(
+        'PLAYER_REQUIRED',
+        'Sólo el jugador puede usar objetos de su propia Bag.',
+      );
+    return digest([
+      actor.user.id,
+      actor.clientId,
+      payload.captureId,
+      payload.context,
+      payload.planHash,
+      payload.expectedWalletRevision,
+    ]);
+  }
+  private itemUseOwner(actor: Actor, context: ItemUse['context']) {
+    this.self(actor);
+    const owner = this.current(actor.user.id);
+    if (
+      !owner ||
+      owner.socketId !== actor.socketId ||
+      owner.clientId !== actor.clientId
+    )
+      fail(
+        'OWNER_REQUIRED',
+        'Reconecta este navegador antes de usar Full Restore.',
+      );
+    if ((context === 'local-battle') !== owner.localBattle)
+      fail(
+        'PLAYER_IN_BATTLE',
+        context === 'party'
+          ? 'Usa la acción de objeto del combate mientras estás en batalla.'
+          : 'La batalla local cambió; vuelve a preparar el uso del objeto.',
+      );
+  }
+  async use(actor: Actor, payload: any): Promise<ShopState> {
+    const requestHash = this.itemUseRequest(actor, payload);
+    const use = await this.activity.runExclusive(
+      [actor.user.id],
+      async (): Promise<ItemUse> => {
+        for (let attempt = 0; attempt < 20; attempt++) {
+          this.self(actor);
+          const row = await this.repository.get(actor.user.id);
+          if (!row)
+            fail(
+              'PLAYER_NOT_READY',
+              'Sincroniza tu Bag antes de usar Full Restore.',
+            );
+          const replay = row.uses?.find(
+            (entry) => entry.requestId === payload.requestId,
+          );
+          if (replay) {
+            if (replay.requestHash !== requestHash)
+              fail(
+                'REQUEST_CONFLICT',
+                'Esa solicitud corresponde a otro uso de objeto.',
+              );
+            return useView(replay);
+          }
+          await this.activity.assertAvailable([actor.user.id]);
+          this.itemUseOwner(actor, payload.context);
+          if (row.revision !== payload.expectedWalletRevision)
+            fail(
+              'WALLET_CONFLICT',
+              'La Bag cambió. Sincroniza antes de usar el objeto.',
+            );
+          if ((row.items['full-restore'] ?? 0) < 1)
+            fail('ITEM_UNAVAILABLE', 'No tienes Full Restore en tu Bag.');
+          const identity = await this.auth.authenticate(actor.token);
+          if (
+            identity.user.id !== actor.user.id ||
+            identity.user.role !== 'player'
+          )
+            fail(
+              'INVALID_PLAYER',
+              'La sesión ya no pertenece a un jugador vigente.',
+            );
+          this.itemUseOwner(actor, payload.context);
+          const previous = row.storageRevision;
+          const receipt: ItemUse = {
+            requestId: payload.requestId,
+            userId: actor.user.id,
+            clientId: actor.clientId,
+            itemId: 'full-restore',
+            captureId: payload.captureId,
+            context: payload.context,
+            planHash: payload.planHash,
+            expectedWalletRevision: payload.expectedWalletRevision,
+            walletRevision: row.revision + 1,
+            status: 'pending',
+          };
+          row.items['full-restore']--;
+          row.revision++;
+          row.storageRevision++;
+          (row.uses ??= []).push({ ...receipt, requestHash });
+          if (!(await this.repository.compareAndSwap(row, previous))) continue;
+          this.activity.changed();
+          return receipt;
+        }
+        fail(
+          'WALLET_CONFLICT',
+          'No se pudo guardar el consumo. Sincroniza y reintenta.',
+        );
+      },
+    );
+    const state = await this.sync(actor, {});
+    return {
+      ...state,
+      use:
+        state.uses?.find((entry) => entry.requestId === use.requestId) ?? use,
+    };
+  }
+  async useCancel(actor: Actor, payload: any): Promise<ShopState> {
+    const requestHash = this.itemUseRequest(actor, payload);
+    const use = await this.activity.runExclusive(
+      [actor.user.id],
+      async (): Promise<ItemUse> => {
+        for (let attempt = 0; attempt < 20; attempt++) {
+          this.self(actor);
+          const row = await this.repository.get(actor.user.id);
+          if (!row)
+            fail('PLAYER_NOT_READY', 'Sincroniza tu Bag antes de continuar.');
+          const replay = row.uses?.find(
+            (entry) => entry.requestId === payload.requestId,
+          );
+          if (replay) {
+            if (replay.requestHash !== requestHash)
+              fail(
+                'REQUEST_CONFLICT',
+                'Esa solicitud corresponde a otro uso de objeto.',
+              );
+            return useView(replay);
+          }
+          const identity = await this.auth.authenticate(actor.token);
+          if (
+            identity.user.id !== actor.user.id ||
+            identity.user.role !== 'player'
+          )
+            fail(
+              'INVALID_PLAYER',
+              'La sesión ya no pertenece a un jugador vigente.',
+            );
+          this.self(actor);
+          const previous = row.storageRevision;
+          const receipt: ItemUse = {
+            requestId: payload.requestId,
+            userId: actor.user.id,
+            clientId: actor.clientId,
+            itemId: 'full-restore',
+            captureId: payload.captureId,
+            context: payload.context,
+            planHash: payload.planHash,
+            expectedWalletRevision: payload.expectedWalletRevision,
+            walletRevision: row.revision,
+            status: 'cancelled',
+          };
+          (row.uses ??= []).push({ ...receipt, requestHash });
+          row.storageRevision++;
+          if (!(await this.repository.compareAndSwap(row, previous))) continue;
+          this.activity.changed();
+          return receipt;
+        }
+        fail(
+          'WALLET_CONFLICT',
+          'No se pudo cancelar el uso. Sincroniza y reintenta.',
+        );
+      },
+    );
+    const state = await this.sync(actor, {});
+    return {
+      ...state,
+      use:
+        state.uses?.find((entry) => entry.requestId === use.requestId) ?? use,
+    };
+  }
+  async useApplied(actor: Actor, payload: any): Promise<ShopState> {
+    object(payload, ['requestId', 'revision']);
+    id(payload.requestId);
+    integer(payload.revision, 1);
+    this.self(actor);
+    if (actor.user.role !== 'player')
+      fail(
+        'PLAYER_REQUIRED',
+        'Sólo el propietario puede confirmar el uso de Full Restore.',
+      );
+    await this.activity.runExclusive([actor.user.id], async () => {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        this.self(actor);
+        const row = await this.repository.get(actor.user.id);
+        const use = row?.uses?.find(
+          (entry) => entry.requestId === payload.requestId,
+        );
+        if (
+          !use ||
+          use.userId !== actor.user.id ||
+          use.clientId !== actor.clientId
+        )
+          fail(
+            'OWNER_REQUIRED',
+            'Confirma el uso desde su navegador original.',
+          );
+        if (use.status === 'cancelled')
+          fail('ITEM_USE_CANCELLED', 'El uso del objeto fue cancelado.');
+        if (use.walletRevision !== payload.revision)
+          fail('WALLET_CONFLICT', 'La revisión no corresponde al consumo.');
+        if (use.status === 'applied') return;
+        const owner = this.current(actor.user.id);
+        if (
+          !owner ||
+          owner.socketId !== actor.socketId ||
+          owner.clientId !== use.clientId
+        )
+          fail('OWNER_REQUIRED', 'Reconecta el navegador que usó el objeto.');
+        const previous = row.storageRevision;
+        use.status = 'applied';
+        row.storageRevision++;
+        if (!(await this.repository.compareAndSwap(row, previous))) continue;
+        this.activity.changed();
+        return;
+      }
+      fail(
+        'WALLET_CONFLICT',
+        'No se pudo confirmar el guardado del uso. Sincroniza y reintenta.',
       );
     });
     return this.sync(actor, {});

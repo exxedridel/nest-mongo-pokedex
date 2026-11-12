@@ -216,7 +216,10 @@ export class ShopGateway
       | 'applied'
       | 'reset'
       | 'resetApplied'
-      | 'resetCancel',
+      | 'resetCancel'
+      | 'use'
+      | 'useApplied'
+      | 'useCancel',
     payload: any,
   ) {
     try {
@@ -261,6 +264,24 @@ export class ShopGateway
     @MessageBody() payload: any,
   ) {
     return this.run(socket, 'reset', payload);
+  }
+  @SubscribeMessage('shop:use') use(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'use', payload);
+  }
+  @SubscribeMessage('shop:use-applied') useApplied(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'useApplied', payload);
+  }
+  @SubscribeMessage('shop:use-cancel') useCancel(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'useCancel', payload);
   }
   @SubscribeMessage('shop:reset-applied') resetApplied(
     @ConnectedSocket() socket: Socket,

@@ -44,11 +44,26 @@ export type GameReset = {
   status: 'pending' | 'applied' | 'cancelled';
 };
 export type StoredGameReset = GameReset & { requestHash: string };
+export type ItemUse = {
+  requestId: string;
+  userId: number;
+  clientId: string;
+  itemId: 'full-restore';
+  captureId: string;
+  context: 'party' | 'local-battle';
+  planHash: string;
+  expectedWalletRevision: number;
+  walletRevision: number;
+  status: 'pending' | 'applied' | 'cancelled';
+};
+export type StoredItemUse = ItemUse & { requestHash: string };
 export type WalletRecord = Wallet & {
   storageRevision: number;
   purchases: StoredPurchase[];
   // Absent on wallets created before game reset support.
   resets?: StoredGameReset[];
+  uses?: StoredItemUse[];
+  battleUses?: { key: string; battleId: string; commandId: string }[];
 };
 export type ShopActor = Actor & { ready: boolean; localBattle: boolean };
 export type ShopPlayer = {
@@ -60,6 +75,7 @@ export type ShopPlayer = {
   wallet: Wallet | null;
   pending: boolean;
   pendingReset?: boolean;
+  pendingUse?: boolean;
 };
 export type ShopState = {
   wallet?: Wallet;
@@ -67,6 +83,8 @@ export type ShopState = {
   purchases?: Purchase[];
   resets?: GameReset[];
   reset?: GameReset;
+  uses?: ItemUse[];
+  use?: ItemUse;
 };
 export class ShopError extends Error {
   constructor(
@@ -96,4 +114,8 @@ export function purchaseView(record: StoredPurchase): Purchase {
 export function resetView(record: StoredGameReset): GameReset {
   const { requestHash: _, ...reset } = record;
   return clone(reset);
+}
+export function useView(record: StoredItemUse): ItemUse {
+  const { requestHash: _, ...use } = record;
+  return clone(use);
 }

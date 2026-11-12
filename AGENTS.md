@@ -9,6 +9,19 @@ Acuerdo del usuario confirmado el 2026-11-08:
 
 Si esta disponible, leer [la memoria compartida](../PROJECT_MEMORY.md). Este resumen se conserva tambien aqui para sesiones que abran solo este repositorio.
 
+Full Restore con stock Bag autorizado 2026-11-12 con React2.3.0. ShopService
+use/use-applied/use-cancel debita1+pending en CAS, contexto party/local-battle,
+planHash y sesión/client/revisión; cancelación persistente. Sin motor/Party en
+servidor. Admin PvP permite item autorizado con stock humano. Battle.inventory/
+itemCommands reservan presupuesto; session.networkItems.used indica ejecución.
+pendingInventoryCheckpoint se guarda antes del débito entre documentos;
+wallet.battleUses deduplica batalla/comando y sync completa el checkpoint.
+Cancelar/forfeit antes del efecto no cobra. Campos opcionales legacy; mantener
+minimize:false. ShopModule global comparte providers sin inyectar PvP en Shop;
+Shop es opcional en PvpService para tests legacy sin items. 48 Shop/35 PvP/29 chat
+y build correctos. Chrome compra/dashboard/wild/Trainer/Storage/reload pasa.
+Sin MySQL/env/seed ni borrado de reservas. Desplegar Nest luego React.
+
 Economía Poké Mart /shop persiste wallets+recibos, partida general sigue local.
 Corrección autorizada2026-11-12: shop:reset del propio jugador establece500 y
 items{} enCAS, GameReset pending. Excluye batallas/compras con ActivityService;

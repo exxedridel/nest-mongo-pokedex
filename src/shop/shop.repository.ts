@@ -26,6 +26,8 @@ export const ShopWalletSchema = new Schema(
     items: { type: Schema.Types.Mixed, required: true },
     purchases: { type: [Schema.Types.Mixed], required: true },
     resets: { type: [Schema.Types.Mixed], default: [] },
+    uses: { type: [Schema.Types.Mixed], default: [] },
+    battleUses: { type: [Schema.Types.Mixed], default: [] },
   },
   {
     collection: 'shop_wallets',

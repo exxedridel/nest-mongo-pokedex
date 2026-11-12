@@ -20,6 +20,8 @@ describe('Mongo wallet atomic replacement (real Mongoose, fake driver)', () => {
     items: {},
     purchases: [],
     resets: [],
+    uses: [],
+    battleUses: [],
   });
   beforeEach(() => {
     fixture = createMongooseShopFixture({ mongoose, schema: ShopWalletSchema });
