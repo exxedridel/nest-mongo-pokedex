@@ -18,8 +18,9 @@ La Tienda obtiene automáticamente las cuentas de jugador conectadas a `/shop`.
 Sólo una cuenta admin vigente puede comprar. El servidor decide el precio a
 partir del catálogo; rechaza saldos/precios enviados por el cliente, cantidades
 fuera de 1–99, fondos insuficientes y revisiones antiguas. Comprar guarda saldo,
-cantidades y recibo en **una única escritura CAS** con journaling; el uso de los
-otros objetos queda para una etapa posterior; Full Restore sí se consume.
+cantidades y recibo en **una única escritura CAS** con journaling. Full Restore,
+Max Ether y Max Elixir se consumen; el resto conserva cantidades para uso posterior.
+Max Ether cuesta350 Pokedollars y Max Elixir700; Nest fija esos precios.
 
 Antes de cobrar, `shop:prepare` solicita al navegador seleccionado que confirme
 que está fuera de batalla y guarde una reserva local. El ACK tiene cinco segundos
@@ -62,7 +63,7 @@ devuelve ese mismo resultado: cancelar no revierte un reinicio confirmado.
 La cancelación impide ejecutar después una copia retrasada de la solicitud.
 Reintentar el mismo ID nunca repone fondos ni vuelve a borrar la partida.
 
-### Uso de Full Restore
+### Uso de Full Restore, Max Ether y Max Elixir
 
 `shop:use {requestId,captureId,context,planHash,expectedWalletRevision}` consume
 una unidad de la Bag del propio jugador, con contexto `party` o `local-battle`.
@@ -72,6 +73,13 @@ operación o batalla reservada. Persiste wallet y recibo `pending` en un CAS.
 `shop:use-cancel` recibe el payload original y persiste `cancelled` si todavía
 no se consumió. Los pendientes bloquean compras, reinicios y reservas de batalla.
 
+`itemId` opcional admite `full-restore`, `max-ether` o `max-elixir`; omitirlo
+conserva el contrato anterior de Full Restore. `moveId` es obligatorio sólo
+para Max Ether. Recibos y reintentos vinculan objeto, objetivo, movimiento y
+plan; cambiar esos datos con el mismo ID produce conflicto. La huella de los
+recibos Full Restore anteriores permanece idéntica. El efecto y la validación
+de que faltan PP se preparan en React, que guarda antes de confirmar el débito.
+
 En `/pvp`, sólo se aceptan elecciones item de los humanos con stock. Elegirlo
 reserva la acción sin descontar la unidad. El adaptador admin registra el comando
 cuando se ejecuta el evento nativo; el checkpoint identifica esos comandos en
@@ -79,6 +87,14 @@ cuando se ejecuta el evento nativo; el checkpoint identifica esos comandos en
 antes de debitar cada wallet por clave batalla/comando. Al terminar el débito
 confirma el checkpoint. Sync reanuda ese registro tras fallos, sin doble consumo.
 Cancelar o terminar por rendición antes de ejecutar el objeto no consume.
+
+La vista admin conserva `inventory` numérico por lado para Full Restore y añade
+`itemInventory` con cantidades por lado y tipo de objeto. Comandos y outbox
+vinculan también `itemId`/`moveId`; sus campos opcionales conservan compatibilidad.
+Las instantáneas admiten `moves[].currentPp` y los resultados `movesPp` con el
+mapa exacto de movimientos aprendidos. `pp` sigue siendo el máximo del catálogo.
+PP0 y hashes originales se conservan; una reserva antigua no se normaliza ni se
+borra. El asset Gen III `movePpData.json` viaja al build como respaldo de máximos.
 
 Los campos nuevos son opcionales para wallets/batallas anteriores. No ejecutar
 seed ni borrar reservas. El motor, HP y RNG siguen calculándose en React.

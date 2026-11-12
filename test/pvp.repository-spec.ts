@@ -86,6 +86,52 @@ describe('Mongo PvP serialization and recovery (real Mongoose, fake driver)', ()
   });
   afterEach(() => fixture.dispose());
 
+  it('round-trips zero PP, per-item budgets and the item-bound recovery outbox', async () => {
+    const input = battle();
+    input.session.teams.a.pokemons[0].moves = [{ id: 1, pp: 35, currentPp: 0 }];
+    input.inventory = { a: 1, b: 0 };
+    input.itemInventory = {
+      a: { 'full-restore': 1, 'max-ether': 2, 'max-elixir': 0 },
+      b: {},
+    };
+    input.itemCommands = {
+      key: {
+        commandId: 'ether',
+        side: 'a',
+        captureId: 'first',
+        requestKey: 'request',
+        itemId: 'max-ether',
+        moveId: 1,
+      },
+    };
+    input.pendingInventoryCheckpoint = {
+      session: input.session,
+      processedCommandIds: ['ether'],
+      expectedRevision: 1,
+      epoch: 2,
+      fingerprint: 'hash',
+      charges: [
+        {
+          commandId: 'ether',
+          side: 'a',
+          userId: 2,
+          itemId: 'max-ether',
+          moveId: 1,
+        },
+      ],
+    };
+    await repository.insert(input);
+    input.revision++;
+    expect(await repository.compareAndSwap(input, 4)).toBe(true);
+    const read = await repository.get(input.battleId);
+    expect(read.itemInventory).toEqual(input.itemInventory);
+    expect(read.itemCommands).toEqual(input.itemCommands);
+    expect(read.pendingInventoryCheckpoint).toEqual(
+      input.pendingInventoryCheckpoint,
+    );
+    expect(read.session.teams.a.pokemons[0].moves[0].currentPp).toBe(0);
+  });
+
   it('reproduces the previous loss with minimize:true and preserves maps on insert and replacement', async () => {
     const oldSchema = PvpBattleSchema.clone().set('minimize', true);
     const old = createMongoosePvpFixture({ mongoose, schema: oldSchema });

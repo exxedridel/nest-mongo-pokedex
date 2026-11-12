@@ -9,7 +9,28 @@ Acuerdo del usuario confirmado el 2026-11-08:
 
 Si esta disponible, leer [la memoria compartida](../PROJECT_MEMORY.md). Este resumen se conserva tambien aqui para sesiones que abran solo este repositorio.
 
-Full Restore con stock Bag autorizado 2026-11-12 con React2.3.0. ShopService
+Etapa vigente2026-11-12 React2.4.0: PP persistentes y Max Ether350/Max Elixir700.
+Usuario confirmó PP entre batallas/reloads; missing/new a máximo, Struggle con
+todos0, continuaciones/recarga sin gasto adicional. Ether selecciona movimiento,
+Elixir todos del Pokémon; admite KO y no gasta con PP completos. Motor/IA siguen
+en React; Nest sólo valida/persiste y coordina inventario. currentPp opcional
+en snapshot se valida0..máximo de pp catálogo o JSONGenIII compartido con React;
+copiar asset a dist. pp catálogo sigue inmutable. Primer checkpoint conserva PP
+original; staticCapture ignora sólo currentPp. Result.movesPp opcional enlaza IDs
+originales exactos; resultados legacy sin PP conservan su forma/hashes.
+Shop catálogo y use/cancel soportan3 consumibles, moveId sólo Ether; omisión
+itemId sigue Full Restore. Su requestHash antiguo se conserva literalmente.
+Battle.itemInventory por lado/tipo mantiene inventory numérico Full Restore.
+Grants/itemCommands/outbox/battleUses vinculan itemId/moveId y conservan clave
+batalla/comando; outbox previo al débito recupera sin consumo duplicado incluso
+desde documentos legacy. No normalizar snapshots/planes antes de validar hashes.
+63 Shop/47 PvP/29 chat y build pasan;14 motor/6 legacy/9 Party/15 wallet frontend
+aprobadas. Suite combinada152, TS y build React correctos. Chrome2.4.0 Tienda/
+PP/wild/Trainer/JcJ/reconexión pasa, incluidos stock/PP tras resultado y reload.
+Producción no verificada. Desplegar Nest luego React,
+sin variables nuevas/MySQL/seed ni borrar reservas. Ver memoria compartida.
+
+Etapa anterior: Full Restore con stock Bag autorizado 2026-11-12 con React2.3.0. ShopService
 use/use-applied/use-cancel debita1+pending en CAS, contexto party/local-battle,
 planHash y sesión/client/revisión; cancelación persistente. Sin motor/Party en
 servidor. Admin PvP permite item autorizado con stock humano. Battle.inventory/

@@ -8,6 +8,7 @@ import {
 import { PvpModule } from '../src/pvp/pvp.module';
 import { ShopService } from '../src/shop/shop.service';
 import { MemoryShopRepository } from '../src/shop/shop.repository';
+import { ConsumableItemId } from '../src/shop/shop.types';
 import { PlayerActivityService } from '../src/messages/player-activity.service';
 import {
   MemoryPvpRepository,
@@ -555,6 +556,86 @@ describe('Durable PvP service, repository and private projection', () => {
     }
     expect((await repo.get(battle.battleId)).phase).toBe('finalized');
     expect(await repo.locked()).toHaveLength(0);
+  });
+  it('preserves depleted PP on the first checkpoint, accepts later changes, and exports only bounded learned move PP', async () => {
+    let battle = await service.create(actors[1], createPayload());
+    for (const userId of [2, 3]) {
+      const sent = snapshot(battle, userId, actors[userId].clientId);
+      sent.pokemons[0].moves[0].currentPp = userId === 2 ? 0 : 20;
+      sent.baseHash = digest(sent.pokemons);
+      await service.snapshot(actors[userId], { snapshot: sent });
+    }
+    battle = await repo.get(battle.battleId);
+    const initial = session(battle);
+    initial.teams.a.pokemons[0].moves[0].currentPp = 35;
+    const payload = {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 0,
+      processedCommandIds: [],
+    };
+    await expect(
+      service.checkpoint(actors[1], { ...payload, session: initial }),
+    ).rejects.toMatchObject({ code: 'INVALID_CHECKPOINT' });
+    initial.teams.a.pokemons[0].moves[0].currentPp = 0;
+    battle = await service.checkpoint(actors[1], {
+      ...payload,
+      session: initial,
+    });
+    const finished = clone(battle.session);
+    finished.teams.a.pokemons[0].moves[0].currentPp = 35;
+    finished.teams.b.pokemons[0].moves[0].currentPp = 19;
+    finished.phase = 'finished';
+    finished.runtime.ended = true;
+    finished.runtime.winner = 'a';
+    finished.runtime.serial++;
+    const invalid = clone(finished);
+    invalid.teams.a.pokemons[0].moves[0].pp = 40;
+    await expect(
+      service.checkpoint(actors[1], {
+        ...payload,
+        expectedCheckpointRevision: 1,
+        session: invalid,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_CHECKPOINT' });
+    await service.checkpoint(actors[1], {
+      ...payload,
+      expectedCheckpointRevision: 1,
+      session: finished,
+    });
+    const result = await service.finalize(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+    });
+    expect(result.results.a.patches[0].movesPp).toEqual([
+      { moveId: 1, currentPp: 35 },
+    ]);
+    expect(result.results.b.patches[0].movesPp).toEqual([
+      { moveId: 1, currentPp: 19 },
+    ]);
+    expect(result.results.a.baseHash).toBe(battle.players.a.snapshot.baseHash);
+  });
+  it.each([-1, 1.5, 36, null, '1'])(
+    'rejects invalid current PP %s without changing a snapshot hash',
+    async (currentPp) => {
+      const battle = await service.create(actors[1], createPayload());
+      const sent = snapshot(battle, 2, actors[2].clientId);
+      sent.pokemons[0].moves[0].currentPp = currentPp;
+      sent.baseHash = digest(sent.pokemons);
+      expect(() => validateSnapshot(sent)).toThrow();
+    },
+  );
+  it('validates missing catalog PP with the shared Gen III fallback without rewriting the snapshot', async () => {
+    const battle = await service.create(actors[1], createPayload());
+    const sent = snapshot(battle, 2, actors[2].clientId);
+    sent.pokemons[0].moves[0].pp = null;
+    sent.pokemons[0].moves[0].currentPp = 35;
+    sent.baseHash = digest(sent.pokemons);
+    const before = clone(sent);
+    expect(validateSnapshot(sent)).toEqual(before);
+    sent.pokemons[0].moves[0].currentPp = 36;
+    sent.baseHash = digest(sent.pokemons);
+    expect(() => validateSnapshot(sent)).toThrow();
   });
   it('only cancels preparation and reuses released player/admin reservations', async () => {
     const battle = await active();
@@ -1136,6 +1217,8 @@ describe('Full Restore battle inventory settlement', () => {
     for (const userId of [2, 3]) {
       await shop.presence(actors[userId], { ready: true, localBattle: false });
       wallets.rows.get(userId).items['full-restore'] = 2;
+      wallets.rows.get(userId).items['max-ether'] = 2;
+      wallets.rows.get(userId).items['max-elixir'] = 2;
     }
     battle = await pvp.create(actors[1], {
       commandId: 'inventory-battle',
@@ -1155,7 +1238,10 @@ describe('Full Restore battle inventory settlement', () => {
       processedCommandIds: [],
     });
   });
-  async function item() {
+  async function item(
+    itemId: ConsumableItemId = 'full-restore',
+    moveId?: number,
+  ) {
     return pvp.command(actors[1], {
       battleId: battle.battleId,
       commandId: 'restore-action',
@@ -1163,19 +1249,31 @@ describe('Full Restore battle inventory settlement', () => {
       requestKey: requestKey(battle.session, 'a'),
       choice: {
         kind: 'item',
-        item: 'full-restore',
+        item: itemId,
         captureId: battle.session.teams.a.activeCaptureId,
+        ...(moveId === undefined ? {} : { moveId }),
       },
     });
   }
   function checkpoint(input: Battle, used: string[], pending = false) {
     const next = clone(input.session);
+    const choice = input.commands.find(
+      (command) => command.choice.kind === 'item',
+    )?.choice;
     next.networkItems = {
       pending: pending
         ? {
             a: {
               commandId: 'restore-action',
               captureId: next.teams.a.activeCaptureId,
+              ...(choice?.kind === 'item'
+                ? {
+                    itemId: choice.item,
+                    ...(choice.moveId === undefined
+                      ? {}
+                      : { moveId: choice.moveId }),
+                  }
+                : {}),
             },
           }
         : {},
@@ -1185,8 +1283,11 @@ describe('Full Restore battle inventory settlement', () => {
       ? {
           a: {
             kind: 'item',
-            item: 'full-restore',
+            item: choice?.kind === 'item' ? choice.item : 'full-restore',
             captureId: next.teams.a.activeCaptureId,
+            ...(choice?.kind === 'item' && choice.moveId !== undefined
+              ? { moveId: choice.moveId }
+              : {}),
           },
         }
       : {};
@@ -1250,8 +1351,18 @@ describe('Full Restore battle inventory settlement', () => {
     expect(
       (await repo.get(battle.battleId)).pendingInventoryCheckpoint,
     ).toBeDefined();
+    // An upgrade may resume an old Full Restore outbox after its wallet debit.
+    const legacy = await repo.get(battle.battleId);
+    delete legacy.itemInventory;
+    for (const entry of Object.values(legacy.itemCommands)) delete entry.itemId;
+    for (const charge of legacy.pendingInventoryCheckpoint.charges)
+      delete charge.itemId;
+    legacy.revision++;
+    await cas(legacy, legacy.revision - 1);
+    delete wallets.rows.get(2).battleUses[0].itemId;
     const resumed = await pvp.sync(actors[1], { battleId: battle.battleId });
     expect(resumed.state.session.networkItems.used).toEqual(['restore-action']);
+    expect(resumed.state.itemInventory.a['full-restore']).toBe(1);
     expect(await shop.fullRestoreStock(2)).toBe(1);
     expect(
       (await repo.get(battle.battleId)).pendingInventoryCheckpoint,
@@ -1273,11 +1384,88 @@ describe('Full Restore battle inventory settlement', () => {
   });
   it('keeps unusual command IDs as data across persistence and inventory settlement', async () => {
     const queued = await pvp.command(actors[1], {
-      battleId: battle.battleId, commandId: '__proto__', side: 'a',
+      battleId: battle.battleId,
+      commandId: '__proto__',
+      side: 'a',
       requestKey: requestKey(battle.session, 'a'),
-      choice: { kind: 'item', item: 'full-restore', captureId: battle.session.teams.a.activeCaptureId },
+      choice: {
+        kind: 'item',
+        item: 'full-restore',
+        captureId: battle.session.teams.a.activeCaptureId,
+      },
     });
     await pvp.checkpoint(actors[1], checkpoint(queued, ['__proto__']));
     expect(await shop.fullRestoreStock(2)).toBe(1);
+  });
+  it.each(['max-ether', 'max-elixir'] as const)(
+    'settles %s separately from Full Restore and rejects altered pending selectors',
+    async (itemId) => {
+      const queued = await item(itemId, itemId === 'max-ether' ? 1 : undefined);
+      expect(pvp.view(queued, actors[1]).itemInventory.a[itemId]).toBe(2);
+      const payload = checkpoint(queued, [], true);
+      const wrong = clone(payload);
+      wrong.session.networkItems.pending.a.itemId = 'full-restore';
+      await expect(pvp.checkpoint(actors[1], wrong)).rejects.toMatchObject({
+        code: 'INVALID_CHECKPOINT',
+      });
+      if (itemId === 'max-ether') {
+        const changedMove = clone(payload);
+        changedMove.session.networkItems.pending.a.moveId = 2;
+        await expect(
+          pvp.checkpoint(actors[1], changedMove),
+        ).rejects.toMatchObject({ code: 'INVALID_CHECKPOINT' });
+      }
+      const selected = await pvp.checkpoint(actors[1], payload);
+      const executed = checkpoint(selected, ['restore-action']);
+      const done = await pvp.checkpoint(actors[1], executed);
+      expect(done.itemInventory.a[itemId]).toBe(1);
+      expect(done.inventory.a).toBe(2);
+      expect((await shop.battleItemStock(2))[itemId]).toBe(1);
+      expect(await shop.fullRestoreStock(2)).toBe(2);
+      await pvp.checkpoint(actors[1], executed);
+      expect(wallets.rows.get(2).battleUses).toHaveLength(1);
+    },
+  );
+  it('rejects an Ether selector outside the target learned moves and item-specific empty stock', async () => {
+    await expect(item('max-ether')).rejects.toThrow();
+    await expect(item('max-ether', 2)).rejects.toMatchObject({
+      code: 'INVALID_CHOICE',
+    });
+    const depleted = clone(battle);
+    depleted.itemInventory.a['max-elixir'] = 0;
+    depleted.revision++;
+    await repo.compareAndSwap(depleted, battle.revision);
+    await expect(item('max-elixir')).rejects.toMatchObject({
+      code: 'ITEM_UNAVAILABLE',
+    });
+    expect(await shop.fullRestoreStock(2)).toBe(2);
+  });
+  it('recovers a Max Ether outbox after a failed checkpoint write with exactly one item debit', async () => {
+    const queued = await item('max-ether', 1);
+    const payload = checkpoint(queued, ['restore-action']);
+    const cas = repo.compareAndSwap.bind(repo);
+    let failCommit = true;
+    repo.compareAndSwap = async (next, rev) => {
+      if (
+        failCommit &&
+        next.session?.networkItems?.used?.includes('restore-action') &&
+        !next.pendingInventoryCheckpoint
+      ) {
+        failCommit = false;
+        throw new Error('simulated Ether checkpoint write failure');
+      }
+      return cas(next, rev);
+    };
+    await expect(pvp.checkpoint(actors[1], payload)).rejects.toThrow(
+      'simulated Ether',
+    );
+    expect((await shop.battleItemStock(2))['max-ether']).toBe(1);
+    expect(
+      (await repo.get(battle.battleId)).pendingInventoryCheckpoint.charges[0],
+    ).toMatchObject({ itemId: 'max-ether', moveId: 1 });
+    const resumed = await pvp.sync(actors[1], { battleId: battle.battleId });
+    expect(resumed.state.itemInventory.a['max-ether']).toBe(1);
+    expect((await shop.battleItemStock(2))['max-ether']).toBe(1);
+    expect(wallets.rows.get(2).battleUses).toHaveLength(1);
   });
 });

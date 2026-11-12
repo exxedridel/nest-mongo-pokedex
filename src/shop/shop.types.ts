@@ -6,10 +6,18 @@ export const SHOP_CATALOG = {
   'great-ball': 300,
   'ultra-ball': 450,
   'full-restore': 350,
+  'max-ether': 350,
+  'max-elixir': 700,
   tm: 500,
   bicycle: 1200,
 } as const;
 export type ShopItemId = keyof typeof SHOP_CATALOG;
+export const CONSUMABLE_ITEM_IDS = [
+  'full-restore',
+  'max-ether',
+  'max-elixir',
+] as const;
+export type ConsumableItemId = (typeof CONSUMABLE_ITEM_IDS)[number];
 export type Wallet = {
   userId: number;
   balance: number;
@@ -48,7 +56,8 @@ export type ItemUse = {
   requestId: string;
   userId: number;
   clientId: string;
-  itemId: 'full-restore';
+  itemId: ConsumableItemId;
+  moveId?: number;
   captureId: string;
   context: 'party' | 'local-battle';
   planHash: string;
@@ -63,7 +72,13 @@ export type WalletRecord = Wallet & {
   // Absent on wallets created before game reset support.
   resets?: StoredGameReset[];
   uses?: StoredItemUse[];
-  battleUses?: { key: string; battleId: string; commandId: string }[];
+  battleUses?: {
+    key: string;
+    battleId: string;
+    commandId: string;
+    itemId?: ConsumableItemId;
+    moveId?: number;
+  }[];
 };
 export type ShopActor = Actor & { ready: boolean; localBattle: boolean };
 export type ShopPlayer = {

@@ -1,4 +1,5 @@
 import { UserPublic } from '../messages/messages.types';
+import type { ConsumableItemId } from '../shop/shop.types';
 
 export type Side = 'a' | 'b';
 export const SIDES: Side[] = ['a', 'b'];
@@ -13,7 +14,7 @@ export type Phase =
 export type Choice =
   | { kind: 'move'; moveId: number }
   | { kind: 'switch'; captureId: string }
-  | { kind: 'item'; item: 'full-restore'; captureId: string }
+  | { kind: 'item'; item: ConsumableItemId; captureId: string; moveId?: number }
   | { kind: 'wait' | 'cancel' | 'forfeit' };
 export type Capture = {
   captureId: string;
@@ -54,6 +55,7 @@ export type Result = {
     hp: number;
     statuses: string[];
     statusTurns: Record<string, number>;
+    movesPp?: { moveId: number; currentPp: number }[];
   }[];
 };
 export type Actor = {
@@ -102,9 +104,19 @@ export type Battle = {
   results?: Partial<Record<Side, Result>>;
   lastCheckpoint?: { hash: string; expectedRevision: number; epoch: number };
   inventory?: Partial<Record<Side, number>>;
+  itemInventory?: Partial<
+    Record<Side, Partial<Record<ConsumableItemId, number>>>
+  >;
   itemCommands?: Record<
     string,
-    { commandId: string; side: Side; captureId: string; requestKey: string }
+    {
+      commandId: string;
+      side: Side;
+      captureId: string;
+      requestKey: string;
+      itemId?: ConsumableItemId;
+      moveId?: number;
+    }
   >;
   pendingInventoryCheckpoint?: {
     session: Record<string, any>;
@@ -112,7 +124,13 @@ export type Battle = {
     expectedRevision: number;
     epoch: number;
     fingerprint: string;
-    charges: { commandId: string; userId: number; side: Side }[];
+    charges: {
+      commandId: string;
+      userId: number;
+      side: Side;
+      itemId?: ConsumableItemId;
+      moveId?: number;
+    }[];
   };
 };
 export const humanSides = (battle: Battle): Side[] =>

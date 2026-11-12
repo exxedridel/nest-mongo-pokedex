@@ -163,6 +163,26 @@ describe('Authoritative Pokedollars and purchases', () => {
       expect((await repo.get(2)).balance).toBe(500);
     },
   );
+  it.each([
+    ['max-ether', 350],
+    ['max-elixir', 700],
+  ] as const)(
+    'sells %s at its authoritative catalog price %i',
+    async (itemId, unitPrice) => {
+      repo.rows.get(2).balance = 1400;
+      const result = await service.purchase(
+        clients[1],
+        input({ itemId, quantity: 2 }),
+      );
+      expect(result.purchases[0]).toMatchObject({
+        itemId,
+        unitPrice,
+        total: unitPrice * 2,
+      });
+      expect((await repo.get(2)).items[itemId]).toBe(2);
+      expect((await repo.get(2)).balance).toBe(1400 - unitPrice * 2);
+    },
+  );
   it('rejects player authority, unavailable items, insufficient funds and stale revisions', async () => {
     await expect(service.purchase(clients[2], input())).rejects.toMatchObject({
       code: 'ADMIN_REQUIRED',
@@ -912,6 +932,112 @@ describe('Full Restore local inventory use', () => {
     });
     expect((await repo.get(2)).items['full-restore']).toBe(2);
     expect((await repo.get(2)).uses ?? []).toEqual([]);
+  });
+  it.each(['max-ether', 'max-elixir'] as const)(
+    'consumes only %s and binds its receipt to its exact item and move selector',
+    async (itemId) => {
+      repo.rows.get(2).items = {
+        'full-restore': 2,
+        'max-ether': 2,
+        'max-elixir': 2,
+      };
+      const payload = useInput({
+        itemId,
+        ...(itemId === 'max-ether' ? { moveId: 1 } : {}),
+      });
+      const result = await service.use(clients[2], payload);
+      expect(result.wallet.items[itemId]).toBe(1);
+      expect(result.wallet.items['full-restore']).toBe(2);
+      expect(result.wallet.balance).toBe(500);
+      expect(result.use).toMatchObject({
+        itemId,
+        status: 'pending',
+        ...(itemId === 'max-ether' ? { moveId: 1 } : {}),
+      });
+      await service.use(clients[2], payload);
+      expect((await repo.get(2)).items[itemId]).toBe(1);
+      await expect(
+        service.use(clients[2], {
+          ...payload,
+          itemId: 'full-restore',
+          moveId: undefined,
+        }),
+      ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+      if (itemId === 'max-ether')
+        await expect(
+          service.use(clients[2], { ...payload, moveId: 2 }),
+        ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+      await service.useApplied(clients[2], {
+        requestId: payload.requestId,
+        revision: 1,
+      });
+      expect((await service.sync(clients[2])).uses[0].status).toBe('applied');
+    },
+  );
+  it.each([
+    { itemId: null },
+    { itemId: 'max-ether' },
+    { itemId: 'max-ether', moveId: 0 },
+    { itemId: 'max-ether', moveId: 355 },
+    { itemId: 'max-ether', moveId: 1.5 },
+    { itemId: 'max-elixir', moveId: 1 },
+    { itemId: 'full-restore', moveId: 1 },
+  ])(
+    'rejects invalid consumable or selector %j without debit',
+    async (selection) => {
+      await expect(
+        service.use(clients[2], useInput(selection)),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+      expect((await repo.get(2)).revision).toBe(0);
+    },
+  );
+  it('preserves legacy Full Restore fingerprints when itemId becomes explicit', async () => {
+    await service.use(clients[2], useInput());
+    expect(
+      (await service.use(clients[2], useInput({ itemId: 'full-restore' })))
+        .wallet.items['full-restore'],
+    ).toBe(1);
+    expect((await repo.get(2)).uses).toHaveLength(1);
+  });
+  it('persists a Max Ether cancellation bound to its move and prevents late consumption', async () => {
+    repo.rows.get(2).items['max-ether'] = 1;
+    const payload = useInput({ itemId: 'max-ether', moveId: 1 });
+    const cancelled = await service.useCancel(clients[2], payload);
+    expect(cancelled.use).toMatchObject({
+      itemId: 'max-ether',
+      moveId: 1,
+      status: 'cancelled',
+    });
+    expect(
+      (await service.use(clients[2], payload)).wallet.items['max-ether'],
+    ).toBe(1);
+    await expect(
+      service.useCancel(clients[2], { ...payload, moveId: 2 }),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+  });
+  it('battle debit deduplicates the original key while rejecting a different item or Ether target', async () => {
+    repo.rows.get(2).items['max-ether'] = 2;
+    await service.consumeBattleItem(2, 'battle', 'command', 'max-ether', 1);
+    await service.consumeBattleItem(2, 'battle', 'command', 'max-ether', 1);
+    expect((await repo.get(2)).items['max-ether']).toBe(1);
+    await expect(
+      service.consumeBattleItem(2, 'battle', 'command', 'max-ether', 2),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await expect(
+      service.consumeBattleItem(2, 'battle', 'command', 'max-elixir'),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await service.consumeBattleFullRestore(
+      2,
+      'legacy-battle',
+      'legacy-command',
+    );
+    delete repo.rows.get(2).battleUses[1].itemId;
+    await service.consumeBattleFullRestore(
+      2,
+      'legacy-battle',
+      'legacy-command',
+    );
+    expect((await repo.get(2)).items['full-restore']).toBe(1);
   });
 });
 

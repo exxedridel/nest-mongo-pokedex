@@ -3,6 +3,8 @@ import { randomUUID } from 'crypto';
 import { AuthIdentityService } from '../messages/auth-identity.service';
 import { PlayerActivityService } from '../messages/player-activity.service';
 import { ShopService } from '../shop/shop.service';
+import { CONSUMABLE_ITEM_IDS, ConsumableItemId } from '../shop/shop.types';
+import { currentMovePp } from './move-pp';
 import { PVP_REPOSITORY, PvpRepository } from './pvp.repository';
 import {
   Actor,
@@ -123,15 +125,26 @@ export class PvpService implements OnModuleInit {
   }
   private async recoverInventoryCheckpoint(initial: Battle): Promise<Battle> {
     let battle = initial;
-    if (!battle.inventory && this.shop) {
-      for (let attempt = 0; attempt < 20 && !battle.inventory; attempt++) {
+    if ((!battle.inventory || !battle.itemInventory) && this.shop) {
+      for (
+        let attempt = 0;
+        attempt < 20 && (!battle.inventory || !battle.itemInventory);
+        attempt++
+      ) {
         const previous = battle.revision;
         const next = clone(battle);
-        next.inventory = {};
-        for (const side of humanSides(battle))
-          next.inventory[side] = await this.shop.fullRestoreStock(
+        next.inventory ??= {};
+        next.itemInventory = {};
+        for (const side of humanSides(battle)) {
+          const stock = await this.shop.battleItemStock(
             battle.players[side].user.id,
           );
+          next.inventory[side] ??= stock['full-restore'] ?? 0;
+          next.itemInventory[side] = {
+            ...stock,
+            'full-restore': next.inventory[side],
+          };
+        }
         next.revision++;
         if (await this.repository.compareAndSwap(next, previous)) battle = next;
         else battle = await this.repository.get(battle.battleId);
@@ -146,10 +159,12 @@ export class PvpService implements OnModuleInit {
         fail('INVENTORY_UNAVAILABLE', 'No está disponible el inventario.');
       const outbox = battle.pendingInventoryCheckpoint;
       for (const charge of outbox.charges)
-        await this.shop.consumeBattleFullRestore(
+        await this.shop.consumeBattleItem(
           charge.userId,
           battle.battleId,
           charge.commandId,
+          charge.itemId ?? 'full-restore',
+          charge.moveId,
         );
       const previous = battle.revision;
       const next = clone(battle);
@@ -169,8 +184,13 @@ export class PvpService implements OnModuleInit {
           : next.session.phase === 'battle'
             ? 'active'
             : 'ready';
-      for (const charge of outbox.charges)
-        next.inventory[charge.side] = (next.inventory[charge.side] ?? 0) - 1;
+      for (const charge of outbox.charges) {
+        const itemId = charge.itemId ?? 'full-restore';
+        next.itemInventory[charge.side][itemId] =
+          this.battleItemCount(next, charge.side, itemId) - 1;
+        if (itemId === 'full-restore')
+          next.inventory[charge.side] = next.itemInventory[charge.side][itemId];
+      }
       delete next.pendingInventoryCheckpoint;
       next.revision++;
       if (await this.repository.compareAndSwap(next, previous)) battle = next;
@@ -220,15 +240,20 @@ export class PvpService implements OnModuleInit {
       const pending = metadata.pending[side];
       const choice = session.runtime?.pending[side];
       if (pending) {
-        object(pending, ['commandId', 'captureId']);
+        object(pending, ['commandId', 'captureId', 'itemId', 'moveId']);
         id(pending.commandId);
         id(pending.captureId);
         const entry = known(pending.commandId);
         if (
           entry.side !== side ||
           entry.captureId !== pending.captureId ||
+          (entry.itemId ?? 'full-restore') !==
+            (pending.itemId ?? 'full-restore') ||
+          entry.moveId !== pending.moveId ||
           metadata.used.includes(entry.commandId) ||
           choice?.kind !== 'item' ||
+          choice.item !== (entry.itemId ?? 'full-restore') ||
+          choice.moveId !== entry.moveId ||
           choice.captureId !== entry.captureId
         )
           fail(
@@ -241,7 +266,13 @@ export class PvpService implements OnModuleInit {
           'El objeto pendiente carece de autorización.',
         );
     }
-    const charges: { commandId: string; userId: number; side: Side }[] = [];
+    const charges: {
+      commandId: string;
+      userId: number;
+      side: Side;
+      itemId: ConsumableItemId;
+      moveId?: number;
+    }[] = [];
     for (const key of metadata.used) {
       const entry = known(key);
       if (!previous.used.includes(key))
@@ -249,15 +280,33 @@ export class PvpService implements OnModuleInit {
           commandId: key,
           side: entry.side,
           userId: battle.players[entry.side].user.id,
+          itemId: entry.itemId ?? 'full-restore',
+          ...(entry.moveId === undefined ? {} : { moveId: entry.moveId }),
         });
     }
     for (const side of SIDES)
-      if (
-        charges.filter((charge) => charge.side === side).length >
-        (battle.inventory?.[side] ?? 0)
-      )
-        fail('ITEM_UNAVAILABLE', 'El jugador no tiene Full Restore en la Bag.');
+      for (const itemId of CONSUMABLE_ITEM_IDS)
+        if (
+          charges.filter(
+            (charge) => charge.side === side && charge.itemId === itemId,
+          ).length > this.battleItemCount(battle, side, itemId)
+        )
+          fail(
+            'ITEM_UNAVAILABLE',
+            'El jugador no tiene existencias del objeto en la Bag.',
+          );
     return charges;
+  }
+  private battleItemCount(
+    battle: Battle,
+    side: Side,
+    itemId: ConsumableItemId,
+  ): number {
+    return itemId === 'full-restore'
+      ? (battle.inventory?.[side] ??
+          battle.itemInventory?.[side]?.[itemId] ??
+          0)
+      : (battle.itemInventory?.[side]?.[itemId] ?? 0);
   }
   private async load(battleId: string, actor: Actor): Promise<Battle> {
     const battle = await this.repository.get(id(battleId));
@@ -349,6 +398,7 @@ export class PvpService implements OnModuleInit {
     }
     if (admin) {
       state.inventory = clone(battle.inventory ?? {});
+      state.itemInventory = clone(battle.itemInventory ?? {});
       state.session = clone(battle.session);
       state.commands = clone(battle.commands);
       return state;
@@ -575,12 +625,24 @@ export class PvpService implements OnModuleInit {
         )
           fail(
             'INVALID_CHOICE',
-            'No se puede usar Full Restore en ese objetivo o turno.',
+            'No se puede usar el objeto en ese objetivo o turno.',
           );
-        if ((battle.inventory?.[payload.side] ?? 0) < 1)
+        if (
+          choice.item === 'max-ether' &&
+          !team.pokemons.some(
+            (capture: any) =>
+              capture.captureId === choice.captureId &&
+              capture.moves.some((move: any) => move.id === choice.moveId),
+          )
+        )
+          fail(
+            'INVALID_CHOICE',
+            'El movimiento objetivo no pertenece a ese Pokémon.',
+          );
+        if (this.battleItemCount(battle, payload.side, choice.item) < 1)
           fail(
             'ITEM_UNAVAILABLE',
-            'El jugador no tiene Full Restore en su Bag.',
+            'El jugador no tiene existencias de ese objeto en su Bag.',
           );
         command.inventoryAuthorized = true;
       }
@@ -651,6 +713,8 @@ export class PvpService implements OnModuleInit {
           side: command.side,
           captureId: choice.captureId,
           requestKey: command.requestKey,
+          itemId: choice.item,
+          ...(choice.moveId === undefined ? {} : { moveId: choice.moveId }),
         };
     });
   }
@@ -785,6 +849,17 @@ export class PvpService implements OnModuleInit {
               hp: hp(mon),
               statuses,
               statusTurns,
+              ...(mon.moves.some((move: any) => move.currentPp !== undefined)
+                ? {
+                    movesPp: original.moves.map((move: any) => ({
+                      moveId: move.id,
+                      currentPp: currentMovePp(
+                        mon.moves.find((entry: any) => entry.id === move.id) ??
+                          move,
+                      ),
+                    })),
+                  }
+                : {}),
             };
           }),
         };

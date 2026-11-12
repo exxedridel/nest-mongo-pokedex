@@ -28,6 +28,36 @@ describe('Mongo wallet atomic replacement (real Mongoose, fake driver)', () => {
     repository = new MongoShopRepository(fixture.model);
   });
   afterEach(() => fixture.dispose());
+  it('preserves consumable selectors and zero stock through an atomic wallet replacement', async () => {
+    await repository.insert(wallet());
+    const row = wallet();
+    row.items = { 'max-ether': 0, 'max-elixir': 1 };
+    row.uses.push({
+      requestId: 'ether',
+      userId: 2,
+      clientId: 'client',
+      itemId: 'max-ether',
+      moveId: 1,
+      captureId: 'capture',
+      context: 'party',
+      planHash: 'plan',
+      expectedWalletRevision: 0,
+      walletRevision: 1,
+      status: 'pending',
+      requestHash: 'hash',
+    });
+    row.battleUses.push({
+      key: 'battle-ether',
+      battleId: 'battle',
+      commandId: 'command',
+      itemId: 'max-ether',
+      moveId: 1,
+    });
+    row.storageRevision++;
+    row.revision++;
+    expect(await repository.compareAndSwap(row, 0)).toBe(true);
+    expect(await repository.get(2)).toEqual(row);
+  });
   it('initializes once with empty dictionaries preserved and isolates account IDs', async () => {
     expect(await repository.insert(wallet())).toBe(true);
     expect(await repository.insert(wallet())).toBe(false);

@@ -38,6 +38,7 @@ export const PvpBattleSchema = new Schema(
     results: Schema.Types.Mixed,
     lastCheckpoint: Schema.Types.Mixed,
     inventory: Schema.Types.Mixed,
+    itemInventory: Schema.Types.Mixed,
     itemCommands: Schema.Types.Mixed,
     pendingInventoryCheckpoint: Schema.Types.Mixed,
   },

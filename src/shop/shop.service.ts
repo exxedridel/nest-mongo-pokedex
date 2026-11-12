@@ -7,6 +7,8 @@ import { digest } from '../pvp/pvp.validation';
 import { SHOP_REPOSITORY, ShopRepository } from './shop.repository';
 import {
   clone,
+  CONSUMABLE_ITEM_IDS,
+  ConsumableItemId,
   fail,
   GameReset,
   ItemUse,
@@ -81,33 +83,71 @@ export class ShopService implements OnModuleInit {
   async fullRestoreStock(userId: number): Promise<number> {
     return (await this.repository.get(userId))?.items['full-restore'] ?? 0;
   }
+  async battleItemStock(
+    userId: number,
+  ): Promise<Partial<Record<ConsumableItemId, number>>> {
+    const row = await this.repository.get(userId);
+    return Object.fromEntries(
+      CONSUMABLE_ITEM_IDS.map((itemId) => [itemId, row?.items[itemId] ?? 0]),
+    );
+  }
   /** Called only for a durable, authorized battle checkpoint outbox. */
   async consumeBattleFullRestore(
     userId: number,
     battleId: string,
     commandId: string,
   ) {
+    return this.consumeBattleItem(userId, battleId, commandId, 'full-restore');
+  }
+  async consumeBattleItem(
+    userId: number,
+    battleId: string,
+    commandId: string,
+    itemId: ConsumableItemId,
+    moveId?: number,
+  ) {
+    if (
+      !CONSUMABLE_ITEM_IDS.includes(itemId) ||
+      (itemId === 'max-ether'
+        ? !Number.isSafeInteger(moveId) || moveId < 1 || moveId > 354
+        : moveId !== undefined)
+    )
+      fail('INVALID_INPUT', 'Objeto o movimiento no válido.');
     const key = digest([battleId, commandId]);
     for (let attempt = 0; attempt < 20; attempt++) {
       const row = await this.repository.get(userId);
       if (!row)
         fail('INVENTORY_UNAVAILABLE', 'No se encontró la Bag del jugador.');
-      if (row.battleUses?.some((use) => use.key === key)) return;
-      if ((row.items['full-restore'] ?? 0) < 1)
+      const replay = row.battleUses?.find((use) => use.key === key);
+      if (replay) {
+        if (
+          (replay.itemId ?? 'full-restore') !== itemId ||
+          replay.moveId !== moveId
+        )
+          fail('REQUEST_CONFLICT', 'La acción ya corresponde a otro consumo.');
+        return;
+      }
+      if ((row.items[itemId] ?? 0) < 1)
         fail(
           'INSUFFICIENT_ITEMS',
-          'No quedan Full Restore para completar esta acción.',
+          'No quedan existencias del objeto para completar esta acción.',
         );
       const previous = row.storageRevision;
-      row.items['full-restore']--;
+      row.items[itemId]--;
       row.revision++;
       row.storageRevision++;
-      (row.battleUses ??= []).push({ key, battleId, commandId });
+      (row.battleUses ??= []).push({
+        key,
+        battleId,
+        commandId,
+        itemId,
+        ...(moveId === undefined ? {} : { moveId }),
+      });
       if (!(await this.repository.compareAndSwap(row, previous))) continue;
       this.activity.changed();
       return;
     }
-    fail('WALLET_CONFLICT', 'No se pudo confirmar el consumo de Full Restore.');
+    fail('WALLET_CONFLICT', 'No se pudo confirmar el consumo del objeto.');
   }
   connect(actor: Actor) {
     const previous = this.actors.get(actor.socketId);
@@ -557,30 +597,42 @@ export class ShopService implements OnModuleInit {
       'context',
       'planHash',
       'expectedWalletRevision',
+      'itemId',
+      'moveId',
     ]);
     id(payload.requestId);
     id(payload.captureId);
     integer(payload.expectedWalletRevision);
+    const itemId =
+      payload.itemId === undefined ? 'full-restore' : payload.itemId;
+    if (!CONSUMABLE_ITEM_IDS.includes(itemId))
+      fail('INVALID_INPUT', 'Objeto no disponible para usar.');
+    if (itemId === 'max-ether') integer(payload.moveId, 1, 354);
+    else if (payload.moveId !== undefined)
+      fail('INVALID_INPUT', 'Este objeto no admite un movimiento objetivo.');
     if (
       !['party', 'local-battle'].includes(payload.context) ||
       typeof payload.planHash !== 'string' ||
       !/^[a-f0-9]{64}$/.test(payload.planHash)
     )
-      fail('INVALID_INPUT', 'El plan de uso de Full Restore no es válido.');
+      fail('INVALID_INPUT', 'El plan de uso del objeto no es válido.');
     this.self(actor);
     if (actor.user.role !== 'player')
       fail(
         'PLAYER_REQUIRED',
         'Sólo el jugador puede usar objetos de su propia Bag.',
       );
-    return digest([
+    const content = [
       actor.user.id,
       actor.clientId,
       payload.captureId,
       payload.context,
       payload.planHash,
       payload.expectedWalletRevision,
-    ]);
+    ];
+    // Keep the exact original Full Restore fingerprint for pending legacy uses.
+    if (itemId !== 'full-restore') content.push(itemId, payload.moveId ?? null);
+    return digest(content);
   }
   private itemUseOwner(actor: Actor, context: ItemUse['context']) {
     this.self(actor);
@@ -592,7 +644,7 @@ export class ShopService implements OnModuleInit {
     )
       fail(
         'OWNER_REQUIRED',
-        'Reconecta este navegador antes de usar Full Restore.',
+        'Reconecta este navegador antes de usar el objeto.',
       );
     if ((context === 'local-battle') !== owner.localBattle)
       fail(
@@ -604,6 +656,9 @@ export class ShopService implements OnModuleInit {
   }
   async use(actor: Actor, payload: any): Promise<ShopState> {
     const requestHash = this.itemUseRequest(actor, payload);
+    const itemId = (
+      payload.itemId === undefined ? 'full-restore' : payload.itemId
+    ) as ConsumableItemId;
     const use = await this.activity.runExclusive(
       [actor.user.id],
       async (): Promise<ItemUse> => {
@@ -613,7 +668,7 @@ export class ShopService implements OnModuleInit {
           if (!row)
             fail(
               'PLAYER_NOT_READY',
-              'Sincroniza tu Bag antes de usar Full Restore.',
+              'Sincroniza tu Bag antes de usar el objeto.',
             );
           const replay = row.uses?.find(
             (entry) => entry.requestId === payload.requestId,
@@ -633,8 +688,11 @@ export class ShopService implements OnModuleInit {
               'WALLET_CONFLICT',
               'La Bag cambió. Sincroniza antes de usar el objeto.',
             );
-          if ((row.items['full-restore'] ?? 0) < 1)
-            fail('ITEM_UNAVAILABLE', 'No tienes Full Restore en tu Bag.');
+          if ((row.items[itemId] ?? 0) < 1)
+            fail(
+              'ITEM_UNAVAILABLE',
+              'No tienes existencias de este objeto en tu Bag.',
+            );
           const identity = await this.auth.authenticate(actor.token);
           if (
             identity.user.id !== actor.user.id ||
@@ -650,7 +708,8 @@ export class ShopService implements OnModuleInit {
             requestId: payload.requestId,
             userId: actor.user.id,
             clientId: actor.clientId,
-            itemId: 'full-restore',
+            itemId,
+            ...(payload.moveId === undefined ? {} : { moveId: payload.moveId }),
             captureId: payload.captureId,
             context: payload.context,
             planHash: payload.planHash,
@@ -658,7 +717,7 @@ export class ShopService implements OnModuleInit {
             walletRevision: row.revision + 1,
             status: 'pending',
           };
-          row.items['full-restore']--;
+          row.items[itemId]--;
           row.revision++;
           row.storageRevision++;
           (row.uses ??= []).push({ ...receipt, requestHash });
@@ -681,6 +740,9 @@ export class ShopService implements OnModuleInit {
   }
   async useCancel(actor: Actor, payload: any): Promise<ShopState> {
     const requestHash = this.itemUseRequest(actor, payload);
+    const itemId = (
+      payload.itemId === undefined ? 'full-restore' : payload.itemId
+    ) as ConsumableItemId;
     const use = await this.activity.runExclusive(
       [actor.user.id],
       async (): Promise<ItemUse> => {
@@ -715,7 +777,8 @@ export class ShopService implements OnModuleInit {
             requestId: payload.requestId,
             userId: actor.user.id,
             clientId: actor.clientId,
-            itemId: 'full-restore',
+            itemId,
+            ...(payload.moveId === undefined ? {} : { moveId: payload.moveId }),
             captureId: payload.captureId,
             context: payload.context,
             planHash: payload.planHash,
@@ -750,7 +813,7 @@ export class ShopService implements OnModuleInit {
     if (actor.user.role !== 'player')
       fail(
         'PLAYER_REQUIRED',
-        'Sólo el propietario puede confirmar el uso de Full Restore.',
+        'Sólo el propietario puede confirmar el uso del objeto.',
       );
     await this.activity.runExclusive([actor.user.id], async () => {
       for (let attempt = 0; attempt < 20; attempt++) {

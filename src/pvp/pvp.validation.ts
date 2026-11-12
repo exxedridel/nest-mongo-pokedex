@@ -1,4 +1,6 @@
 import { createHash } from 'crypto';
+import { CONSUMABLE_ITEM_IDS } from '../shop/shop.types';
+import { currentMovePp, maxMovePp } from './move-pp';
 import {
   Battle,
   Capture,
@@ -223,6 +225,7 @@ function capture(value: any) {
       'power',
       'accuracy',
       'pp',
+      'currentPp',
       'priority',
       'description',
       'source',
@@ -239,6 +242,8 @@ function capture(value: any) {
     if (move.power !== null) integer(move.power, 0, 1000);
     if (move.accuracy !== null) integer(move.accuracy, 0, 100);
     if (move.pp !== null) integer(move.pp, 0, 100);
+    if (move.currentPp !== undefined)
+      integer(move.currentPp, 0, maxMovePp({ id: move.id, pp: move.pp }));
     integer(move.priority, -7, 7);
     if (typeof move.description !== 'string' || move.description.length > 10000)
       fail('INVALID_SNAPSHOT', 'Descripción de movimiento no válida.');
@@ -354,10 +359,13 @@ export function validateChoice(value: any): Choice {
     object(value, ['kind', 'captureId']);
     id(value.captureId);
   } else if (value.kind === 'item') {
-    object(value, ['kind', 'item', 'captureId']);
-    if (value.item !== 'full-restore')
+    object(value, ['kind', 'item', 'captureId', 'moveId']);
+    if (!CONSUMABLE_ITEM_IDS.includes(value.item))
       fail('INVALID_CHOICE', 'Objeto no disponible.');
     id(value.captureId);
+    if (value.item === 'max-ether') integer(value.moveId, 1, 354);
+    else if (value.moveId !== undefined)
+      fail('INVALID_CHOICE', 'El objeto no acepta un movimiento objetivo.');
   } else if (['wait', 'cancel', 'forfeit'].includes(value.kind))
     object(value, ['kind']);
   else fail('INVALID_CHOICE', 'Acción PvP no válida.');
@@ -380,6 +388,7 @@ function staticCapture(value: Capture) {
   delete output.statusTurns;
   delete output.trainerStatusContext;
   delete output.pokemon.battleStages;
+  for (const move of output.moves) delete move.currentPp;
   output.pokemon.stats = output.pokemon.stats.filter(
     (stat: any) => stat.name !== 'hp',
   );
@@ -451,6 +460,14 @@ export function validateSession(session: any, battle: Battle) {
         );
       if (!battle.session && hp(mon) !== hp(before))
         fail('INVALID_CHECKPOINT', 'El inicio debe conservar el HP enviado.');
+      if (
+        !battle.session &&
+        mon.moves.some(
+          (move: any, index: number) =>
+            currentMovePp(move) !== currentMovePp(before.moves[index]),
+        )
+      )
+        fail('INVALID_CHECKPOINT', 'El inicio debe conservar los PP enviados.');
       if (
         npc &&
         !battle.session &&
