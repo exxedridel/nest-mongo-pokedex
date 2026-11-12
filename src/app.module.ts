@@ -10,6 +10,7 @@ import { EnvConfiguration } from './config/env.config';
 import { JoiValidationSchema } from './config/joi.validation';
 import { MessagesModule } from './messages/messages.module';
 import { PvpModule } from './pvp/pvp.module';
+import { ShopModule } from './shop/shop.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { PvpModule } from './pvp/pvp.module';
 
     MessagesModule,
     PvpModule.forMongo(),
+    ShopModule.forMongo(),
 
     SeedModule,
   ],

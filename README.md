@@ -3,7 +3,57 @@
 MySQL autentica y administra usuarios; Nest verifica su identidad actual y
 comunica las instancias React por Socket.IO. `/mensajes-prueba` permite elegir
 cualquier otro usuario registrado y conversar en privado. No hay una lista fija
-de dos correos. Esta etapa no incorpora sincronización de batallas.
+de dos correos. Las batallas y la Tienda usan los namespaces descritos abajo.
+
+## Pokedollars y Poké Mart: namespace `/shop`
+
+Nest conserva el saldo y las cantidades compradas en `shop_wallets`, separado
+del guardado general de la Party. Cada cuenta de jugador recibe **500 Pokedollars
+una sola vez**, al crear su wallet con `currencyVersion: 1`. El frontend adopta
+ese saldo y reemplaza el dinero local anterior, según la decisión del usuario.
+Reconectar, cerrar sesión o reiniciar una partida local no vuelve a otorgar 500.
+
+La Tienda obtiene automáticamente las cuentas de jugador conectadas a `/shop`.
+Sólo una cuenta admin vigente puede comprar. El servidor decide el precio a
+partir del catálogo; rechaza saldos/precios enviados por el cliente, cantidades
+fuera de 1–99, fondos insuficientes y revisiones antiguas. Comprar guarda saldo,
+cantidades y recibo en **una única escritura CAS** con journaling; el uso de los
+objetos queda para una etapa posterior.
+
+Antes de cobrar, `shop:prepare` solicita al navegador seleccionado que confirme
+que está fuera de batalla y guarde una reserva local. El ACK tiene cinco segundos
+de plazo. Tras esa reserva se revalidan identidad, rol y conexión original antes
+del CAS. Una cola compartida con PvP evita iniciar una batalla durante la compra;
+también se comprueban las reservas persistidas de PvP/Trainer y el estado PvE local.
+
+Una compra persistida queda `pending` hasta que ese navegador guarde la wallet
+y responda `shop:applied`. El resultado se recupera tras desconexión o reinicio;
+no se devuelve el dinero ni se repite el descuento por un timeout. Reenviar el
+mismo `requestId` del mismo admin devuelve la operación anterior, y cambiar su
+contenido se rechaza. Se conservan hasta 4096 compras por wallet sin descartar
+claves de idempotencia; alcanzado el límite se rechazan nuevas compras antes
+de cobrar. Las vistas de historial muestran las últimas 50.
+
+El cliente no libera una reserva sólo porque un evento o una caché carezca de
+recibo. Puede liberarla con un recibo `applied` coincidente o tras un
+`shop:sync` explícito emitido después de PREPARE: esa lectura pasa por la misma
+cola y actúa como barrera para confirmar que la compra se abortó. No se debe
+esperar esa lectura antes de devolver el ACK de PREPARE.
+
+La presencia y la exclusión entre namespaces requieren **una sola réplica Nest**.
+Desplegar **Nest primero y React después**, conservando las variables existentes.
+No cambia MySQL ni requiere nuevas variables. Mongo necesita permisos para crear
+la colección e índices; no ejecutar el seed. Contrato completo en
+[`../SHOP_PROTOCOL.md`](../SHOP_PROTOCOL.md) dentro del workspace.
+
+```bash
+npm run test:shop
+```
+
+Las 25 pruebas de Shop usan sockets reales y repositorios simulados, incluida
+serialización Mongoose con un driver simulado. Cubren autoridad, importes,
+idempotencia, preflight, carreras con batallas, fallos de guardado y reconexión.
+La colección e índices de Mongo reales se deben comprobar al desplegar.
 
 ## Batallas PvP: namespace `/pvp`
 

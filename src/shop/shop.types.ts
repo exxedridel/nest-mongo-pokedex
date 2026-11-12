@@ -1,0 +1,82 @@
+import { Actor } from '../pvp/pvp.types';
+import { UserPublic } from '../messages/messages.types';
+
+export const SHOP_CATALOG = {
+  'poke-ball': 150,
+  'great-ball': 300,
+  'ultra-ball': 450,
+  'full-restore': 350,
+  tm: 500,
+  bicycle: 1200,
+} as const;
+export type ShopItemId = keyof typeof SHOP_CATALOG;
+export type Wallet = {
+  userId: number;
+  balance: number;
+  revision: number;
+  items: Partial<Record<ShopItemId, number>>;
+  currencyVersion: 1;
+};
+export type Purchase = {
+  purchaseId: string;
+  requestId: string;
+  adminUserId: number;
+  userId: number;
+  clientId: string;
+  itemId: ShopItemId;
+  quantity: number;
+  unitPrice: number;
+  total: number;
+  balanceBefore: number;
+  balanceAfter: number;
+  walletRevision: number;
+  status: 'pending' | 'applied';
+};
+export type StoredPurchase = Purchase & {
+  requestHash: string;
+  createdAt?: number;
+};
+export type WalletRecord = Wallet & {
+  storageRevision: number;
+  purchases: StoredPurchase[];
+};
+export type ShopActor = Actor & { ready: boolean; localBattle: boolean };
+export type ShopPlayer = {
+  user: UserPublic;
+  clientId: string;
+  online: boolean;
+  ready: boolean;
+  inBattle: boolean;
+  wallet: Wallet | null;
+  pending: boolean;
+};
+export type ShopState = {
+  wallet?: Wallet;
+  players?: ShopPlayer[];
+  purchases?: Purchase[];
+};
+export class ShopError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+export const fail = (code: string, message: string): never => {
+  throw new ShopError(code, message);
+};
+export const clone = <T>(value: T): T => structuredClone(value);
+export function walletView(record: WalletRecord): Wallet {
+  return clone({
+    userId: record.userId,
+    balance: record.balance,
+    revision: record.revision,
+    items: record.items,
+    currencyVersion: record.currencyVersion,
+  });
+}
+export function purchaseView(record: StoredPurchase): Purchase {
+  const { requestHash: _, createdAt: __, ...purchase } = record;
+  return clone(purchase);
+}

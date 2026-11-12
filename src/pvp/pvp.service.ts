@@ -1,6 +1,7 @@
-import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, OnModuleInit, Optional } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { AuthIdentityService } from '../messages/auth-identity.service';
+import { PlayerActivityService } from '../messages/player-activity.service';
 import { PVP_REPOSITORY, PvpRepository } from './pvp.repository';
 import {
   Actor,
@@ -34,9 +35,20 @@ export class PvpService implements OnModuleInit {
   constructor(
     @Inject(PVP_REPOSITORY) readonly repository: PvpRepository,
     private readonly auth: AuthIdentityService,
+    @Optional() private readonly activity?: PlayerActivityService,
   ) {}
   async onModuleInit() {
     await this.repository.ready();
+    this.activity?.register('battle', async (userIds) => {
+      const requested = new Set(userIds);
+      return [
+        ...new Set(
+          (await this.repository.locked())
+            .flatMap((battle) => battle.lockedUserIds)
+            .filter((userId) => requested.has(userId)),
+        ),
+      ];
+    });
   }
   connect(actor: Actor) {
     this.actors.set(actor.socketId, actor);
@@ -124,10 +136,14 @@ export class PvpService implements OnModuleInit {
     for (let attempt = 0; attempt < 20; attempt++) {
       const battle = await this.load(battleId, actor);
       const previous = battle.revision;
+      const wasLocked = battle.lockHeld;
       if ((await update(battle)) === false) return battle;
       battle.revision++;
       size(battle, 4 * 1024 * 1024);
-      if (await this.repository.compareAndSwap(battle, previous)) return battle;
+      if (await this.repository.compareAndSwap(battle, previous)) {
+        if (wasLocked !== battle.lockHeld) this.activity?.changed();
+        return battle;
+      }
     }
     fail('REVISION_CONFLICT', 'La batalla cambió; sincroniza y reintenta.');
   }
@@ -138,6 +154,13 @@ export class PvpService implements OnModuleInit {
         (battle) => battle.lockedUserIds,
       ),
     );
+    if (this.activity)
+      for (const userId of await this.activity.busyUsers(
+        [...this.actors.values()]
+          .filter((actor) => actor.user.role === 'player')
+          .map((actor) => actor.user.id),
+      ))
+        busy.add(userId);
     const players = new Map<number, Actor>();
     for (const candidate of this.actors.values())
       if (candidate.user.role === 'player')
@@ -220,6 +243,15 @@ export class PvpService implements OnModuleInit {
     };
   }
   async create(actor: Actor, payload: any) {
+    // Shop preflight, debit and battle reservation share this check/write fence.
+    // Repositories still provide durable uniqueness/CAS after a process restart.
+    if (this.activity)
+      return this.activity.runExclusive([], () =>
+        this.createExclusive(actor, payload),
+      );
+    return this.createExclusive(actor, payload);
+  }
+  private async createExclusive(actor: Actor, payload: any) {
     object(payload, ['commandId', 'playerAId', 'playerBId', 'trainerPresetId']);
     id(payload.commandId);
     integer(payload.playerAId, 1);
@@ -252,6 +284,10 @@ export class PvpService implements OnModuleInit {
         );
       return replay;
     }
+    await this.activity?.assertAvailable([
+      payload.playerAId,
+      ...(!isTrainer ? [payload.playerBId] : []),
+    ]);
     const contacts = await this.auth.contacts(actor.token, actor.user.id);
     const players: any = {};
     const selections: [Side, number][] = [['a', payload.playerAId]];
@@ -291,6 +327,7 @@ export class PvpService implements OnModuleInit {
       if (existing && existing.creationHash === creationHash) return existing;
       throw error;
     }
+    this.activity?.changed();
     return battle;
   }
   async snapshot(actor: Actor, payload: any) {

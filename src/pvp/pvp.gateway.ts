@@ -11,6 +11,7 @@ import {
 } from '@nestjs/websockets';
 import { Namespace, Socket } from 'socket.io';
 import { isAllowedFrontendOrigin } from '../config/frontend-origins';
+import { PlayerActivityError } from '../messages/player-activity.service';
 import {
   AuthIdentityService,
   MessageAuthError,
@@ -120,7 +121,11 @@ export class PvpGateway
     this.timers.set(socket.id, timer);
   }
   private detail(error: any) {
-    if (error instanceof PvpError || error instanceof MessageAuthError)
+    if (
+      error instanceof PvpError ||
+      error instanceof MessageAuthError ||
+      error instanceof PlayerActivityError
+    )
       return { code: error.code, message: error.message };
     return {
       code: 'PVP_UNAVAILABLE',
