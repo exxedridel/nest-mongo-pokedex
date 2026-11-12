@@ -11,7 +11,8 @@ Nest conserva el saldo y las cantidades compradas en `shop_wallets`, separado
 del guardado general de la Party. Cada cuenta de jugador recibe **500 Pokedollars
 una sola vez**, al crear su wallet con `currencyVersion: 1`. El frontend adopta
 ese saldo y reemplaza el dinero local anterior, según la decisión del usuario.
-Reconectar, cerrar sesión o reiniciar una partida local no vuelve a otorgar 500.
+Reconectar o cerrar sesión conserva el saldo. Desde React2.2.1, el reinicio
+explícito de partida del jugador sí establece500 y vacía los objetos comprados.
 
 La Tienda obtiene automáticamente las cuentas de jugador conectadas a `/shop`.
 Sólo una cuenta admin vigente puede comprar. El servidor decide el precio a
@@ -40,6 +41,27 @@ recibo. Puede liberarla con un recibo `applied` coincidente o tras un
 cola y actúa como barrera para confirmar que la compra se abortó. No se debe
 esperar esa lectura antes de devolver el ACK de PREPARE.
 
+### Reinicio de partida
+
+`shop:reset {requestId,expectedWalletRevision}` sólo acepta al jugador de la
+sesión actual. Verifica identidad, propietario, revisión y ausencia de batalla
+o compra pendiente usando la misma cola compartida. Una escritura CAS guarda
+saldo500, `items:{}`, revisión incrementada y recibo de reinicio `pending`.
+No borra compras, recibos ni batallas. `resets` es opcional en wallets anteriores;
+el schema preserva los objetos vacíos y no necesita seed ni migración destructiva.
+
+El navegador conserva una solicitud local antes de enviarla, reinicia su Party
+una sola vez mediante guardado comprobado y confirma con
+`shop:reset-applied {requestId,revision}`. Hasta entonces se rechazan compras y
+reservas PvP/Trainer. Los estados de reinicio pendientes se publican a los otros
+navegadores de esa cuenta para que vuelvan al propietario original.
+
+`shop:reset-cancel {requestId,expectedWalletRevision}` persiste un recibo
+`cancelled` si la operación aún no se realizó. Si ya existe `pending/applied`,
+devuelve ese mismo resultado: cancelar no revierte un reinicio confirmado.
+La cancelación impide ejecutar después una copia retrasada de la solicitud.
+Reintentar el mismo ID nunca repone fondos ni vuelve a borrar la partida.
+
 La presencia y la exclusión entre namespaces requieren **una sola réplica Nest**.
 Desplegar **Nest primero y React después**, conservando las variables existentes.
 No cambia MySQL ni requiere nuevas variables. Mongo necesita permisos para crear
@@ -50,7 +72,7 @@ la colección e índices; no ejecutar el seed. Contrato completo en
 npm run test:shop
 ```
 
-Las 25 pruebas de Shop usan sockets reales y repositorios simulados, incluida
+Las pruebas de Shop usan sockets reales y repositorios simulados, incluida
 serialización Mongoose con un driver simulado. Cubren autoridad, importes,
 idempotencia, preflight, carreras con batallas, fallos de guardado y reconexión.
 La colección e índices de Mongo reales se deben comprobar al desplegar.

@@ -25,6 +25,7 @@ export const ShopWalletSchema = new Schema(
     currencyVersion: { type: Number, required: true, enum: [1] },
     items: { type: Schema.Types.Mixed, required: true },
     purchases: { type: [Schema.Types.Mixed], required: true },
+    resets: { type: [Schema.Types.Mixed], default: [] },
   },
   {
     collection: 'shop_wallets',

@@ -8,8 +8,10 @@ import { SHOP_REPOSITORY, ShopRepository } from './shop.repository';
 import {
   clone,
   fail,
+  GameReset,
   Purchase,
   purchaseView,
+  resetView,
   SHOP_CATALOG,
   ShopActor,
   ShopItemId,
@@ -65,8 +67,10 @@ export class ShopService implements OnModuleInit {
         userIds.map((userId) => this.repository.get(userId)),
       );
       return rows
-        .filter((row) =>
-          row?.purchases.some((purchase) => purchase.status === 'pending'),
+        .filter(
+          (row) =>
+            row?.purchases.some((purchase) => purchase.status === 'pending') ||
+            row?.resets?.some((reset) => reset.status === 'pending'),
         )
         .map((row) => row.userId);
     });
@@ -110,6 +114,7 @@ export class ShopService implements OnModuleInit {
       storageRevision: 0,
       items: {},
       purchases: [],
+      resets: [],
     };
     if (await this.repository.insert(initial)) {
       this.activity.changed();
@@ -159,6 +164,16 @@ export class ShopService implements OnModuleInit {
           .filter((purchase) => purchase.clientId === actor.clientId)
           .slice(-50)
           .map(purchaseView),
+        // Pending resets are visible to every browser for this account, so an
+        // alternate device cannot operate while its original owner saves it.
+        resets: [
+          ...(row.resets ?? []).filter((reset) => reset.status === 'pending'),
+          ...(row.resets ?? [])
+            .filter((reset) => reset.status !== 'pending')
+            .slice(-50),
+        ]
+          .sort((left, right) => left.walletRevision - right.walletRevision)
+          .map(resetView),
       };
     }
     this.admin(actor);
@@ -196,6 +211,9 @@ export class ShopService implements OnModuleInit {
       const pending = !!wallet?.purchases.some(
         (purchase) => purchase.status === 'pending',
       );
+      const pendingReset = !!wallet?.resets?.some(
+        (reset) => reset.status === 'pending',
+      );
       players.push({
         user: clone(valid.user),
         clientId: candidate.clientId,
@@ -203,7 +221,8 @@ export class ShopService implements OnModuleInit {
         ready: current.ready,
         inBattle: current.localBattle || busy.has(candidate.user.id),
         wallet: wallet ? walletView(wallet) : null,
-        pending,
+        pending: pending || pendingReset,
+        pendingReset,
       });
     }
     const rows = await this.repository.forAdmin(actor.user.id);
@@ -481,6 +500,245 @@ export class ShopService implements OnModuleInit {
       fail(
         'WALLET_CONFLICT',
         'No se pudo confirmar el guardado. Sincroniza y reintenta.',
+      );
+    });
+    return this.sync(actor, {});
+  }
+
+  async reset(actor: Actor, payload: any): Promise<ShopState> {
+    object(payload, ['requestId', 'expectedWalletRevision']);
+    id(payload.requestId);
+    integer(payload.expectedWalletRevision);
+    this.self(actor);
+    if (actor.user.role !== 'player')
+      fail('PLAYER_REQUIRED', 'Sólo el jugador puede reiniciar su partida.');
+    const requestHash = digest([
+      actor.user.id,
+      actor.clientId,
+      payload.expectedWalletRevision,
+    ]);
+    const reset = await this.activity.runExclusive(
+      [actor.user.id],
+      async (): Promise<GameReset> => {
+        for (let attempt = 0; attempt < 20; attempt++) {
+          this.self(actor);
+          const row = await this.repository.get(actor.user.id);
+          if (!row)
+            fail(
+              'PLAYER_NOT_READY',
+              'Sincroniza tus Pokedollars antes de reiniciar.',
+            );
+          const replay = row.resets?.find(
+            (entry) => entry.requestId === payload.requestId,
+          );
+          if (replay) {
+            if (replay.requestHash !== requestHash)
+              fail(
+                'REQUEST_CONFLICT',
+                'Esa solicitud corresponde a otro reinicio.',
+              );
+            return resetView(replay);
+          }
+          await this.activity.assertAvailable([actor.user.id]);
+          const owner = this.current(actor.user.id);
+          if (
+            !owner ||
+            owner.socketId !== actor.socketId ||
+            owner.clientId !== actor.clientId
+          )
+            fail(
+              'OWNER_REQUIRED',
+              'Reconecta este navegador antes de reiniciar.',
+            );
+          if (owner.localBattle)
+            fail('PLAYER_IN_BATTLE', 'Termina tu batalla antes de reiniciar.');
+          if (row.revision !== payload.expectedWalletRevision)
+            fail(
+              'WALLET_CONFLICT',
+              'El saldo cambió. Sincroniza antes de reiniciar.',
+            );
+          const verified = await this.auth.authenticate(actor.token);
+          if (
+            verified.user.id !== actor.user.id ||
+            verified.user.role !== 'player'
+          )
+            fail(
+              'INVALID_PLAYER',
+              'La sesión ya no pertenece a un jugador vigente.',
+            );
+          this.self(actor);
+          const finalOwner = this.current(actor.user.id);
+          if (
+            !finalOwner ||
+            finalOwner.socketId !== actor.socketId ||
+            finalOwner.clientId !== actor.clientId ||
+            finalOwner.localBattle
+          )
+            fail(
+              'OWNER_REQUIRED',
+              'La conexión o batalla cambió antes de guardar el reinicio.',
+            );
+          const previous = row.storageRevision;
+          const receipt: GameReset = {
+            requestId: payload.requestId,
+            userId: actor.user.id,
+            clientId: actor.clientId,
+            walletRevision: row.revision + 1,
+            status: 'pending',
+          };
+          row.balance = 500;
+          row.items = {};
+          row.revision++;
+          row.storageRevision++;
+          (row.resets ??= []).push({ ...receipt, requestHash });
+          if (!(await this.repository.compareAndSwap(row, previous))) continue;
+          this.activity.changed();
+          return receipt;
+        }
+        fail(
+          'WALLET_CONFLICT',
+          'No se pudo guardar el reinicio. Sincroniza y reintenta.',
+        );
+      },
+    );
+    const state = await this.sync(actor, {});
+    return {
+      ...state,
+      reset:
+        state.resets?.find((entry) => entry.requestId === reset.requestId) ??
+        reset,
+    };
+  }
+
+  async resetCancel(actor: Actor, payload: any): Promise<ShopState> {
+    object(payload, ['requestId', 'expectedWalletRevision']);
+    id(payload.requestId);
+    integer(payload.expectedWalletRevision);
+    this.self(actor);
+    if (actor.user.role !== 'player')
+      fail(
+        'PLAYER_REQUIRED',
+        'Sólo el jugador puede cancelar su solicitud de reinicio.',
+      );
+    const requestHash = digest([
+      actor.user.id,
+      actor.clientId,
+      payload.expectedWalletRevision,
+    ]);
+    const reset = await this.activity.runExclusive(
+      [actor.user.id],
+      async (): Promise<GameReset> => {
+        for (let attempt = 0; attempt < 20; attempt++) {
+          this.self(actor);
+          const row = await this.repository.get(actor.user.id);
+          if (!row)
+            fail(
+              'PLAYER_NOT_READY',
+              'Sincroniza tus Pokedollars antes de continuar.',
+            );
+          const replay = row.resets?.find(
+            (entry) => entry.requestId === payload.requestId,
+          );
+          if (replay) {
+            if (replay.requestHash !== requestHash)
+              fail(
+                'REQUEST_CONFLICT',
+                'Esa solicitud corresponde a otro reinicio.',
+              );
+            // A cancel is a fence against a request that has not committed.
+            // It can never undo a successful reset or release its pending ACK.
+            return resetView(replay);
+          }
+          const verified = await this.auth.authenticate(actor.token);
+          if (
+            verified.user.id !== actor.user.id ||
+            verified.user.role !== 'player'
+          )
+            fail(
+              'INVALID_PLAYER',
+              'La sesión ya no pertenece a un jugador vigente.',
+            );
+          this.self(actor);
+          const previous = row.storageRevision;
+          const receipt: GameReset = {
+            requestId: payload.requestId,
+            userId: actor.user.id,
+            clientId: actor.clientId,
+            walletRevision: row.revision,
+            status: 'cancelled',
+          };
+          (row.resets ??= []).push({ ...receipt, requestHash });
+          row.storageRevision++;
+          if (!(await this.repository.compareAndSwap(row, previous))) continue;
+          this.activity.changed();
+          return receipt;
+        }
+        fail(
+          'WALLET_CONFLICT',
+          'No se pudo cancelar la solicitud. Sincroniza y reintenta.',
+        );
+      },
+    );
+    const state = await this.sync(actor, {});
+    return {
+      ...state,
+      reset:
+        state.resets?.find((entry) => entry.requestId === reset.requestId) ??
+        reset,
+    };
+  }
+
+  async resetApplied(actor: Actor, payload: any): Promise<ShopState> {
+    object(payload, ['requestId', 'revision']);
+    id(payload.requestId);
+    integer(payload.revision, 1);
+    this.self(actor);
+    if (actor.user.role !== 'player')
+      fail(
+        'PLAYER_REQUIRED',
+        'Sólo el propietario puede confirmar el reinicio.',
+      );
+    await this.activity.runExclusive([actor.user.id], async () => {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        this.self(actor);
+        const row = await this.repository.get(actor.user.id);
+        const reset = row?.resets?.find(
+          (entry) => entry.requestId === payload.requestId,
+        );
+        if (
+          !reset ||
+          reset.userId !== actor.user.id ||
+          reset.clientId !== actor.clientId
+        )
+          fail(
+            'OWNER_REQUIRED',
+            'Confirma el reinicio desde su navegador original.',
+          );
+        if (reset.status === 'cancelled')
+          fail('RESET_CANCELLED', 'La solicitud de reinicio fue cancelada.');
+        if (reset.walletRevision !== payload.revision)
+          fail('WALLET_CONFLICT', 'La revisión no corresponde al reinicio.');
+        if (reset.status === 'applied') return;
+        const owner = this.current(actor.user.id);
+        if (
+          !owner ||
+          owner.socketId !== actor.socketId ||
+          owner.clientId !== actor.clientId
+        )
+          fail(
+            'OWNER_REQUIRED',
+            'Reconecta el navegador que reinició la partida.',
+          );
+        const previous = row.storageRevision;
+        reset.status = 'applied';
+        row.storageRevision++;
+        if (!(await this.repository.compareAndSwap(row, previous))) continue;
+        this.activity.changed();
+        return;
+      }
+      fail(
+        'WALLET_CONFLICT',
+        'No se pudo confirmar el reinicio. Sincroniza y reintenta.',
       );
     });
     return this.sync(actor, {});

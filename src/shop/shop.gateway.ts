@@ -209,7 +209,14 @@ export class ShopGateway
   }
   private async run(
     socket: Socket,
-    operation: 'sync' | 'presence' | 'purchase' | 'applied',
+    operation:
+      | 'sync'
+      | 'presence'
+      | 'purchase'
+      | 'applied'
+      | 'reset'
+      | 'resetApplied'
+      | 'resetCancel',
     payload: any,
   ) {
     try {
@@ -248,6 +255,24 @@ export class ShopGateway
     @MessageBody() payload: any,
   ) {
     return this.run(socket, 'applied', payload);
+  }
+  @SubscribeMessage('shop:reset') reset(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'reset', payload);
+  }
+  @SubscribeMessage('shop:reset-applied') resetApplied(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'resetApplied', payload);
+  }
+  @SubscribeMessage('shop:reset-cancel') resetCancel(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'resetCancel', payload);
   }
   onModuleDestroy() {
     this.unsubscribe?.();

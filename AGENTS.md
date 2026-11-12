@@ -9,6 +9,17 @@ Acuerdo del usuario confirmado el 2026-11-08:
 
 Si esta disponible, leer [la memoria compartida](../PROJECT_MEMORY.md). Este resumen se conserva tambien aqui para sesiones que abran solo este repositorio.
 
+Economía Poké Mart /shop persiste wallets+recibos, partida general sigue local.
+Corrección autorizada2026-11-12: shop:reset del propio jugador establece500 y
+items{} enCAS, GameReset pending. Excluye batallas/compras con ActivityService;
+revalida cuenta/socket antes CAS. ACK shop:reset-applied sólo navegador original
+tras guardar Party; pending bloquea nuevascompras y reservas aunque desconecte.
+shop:reset-cancel persiste cancelled si no hubo commit; copias tardías no pueden
+ejecutar. No libera/borra pending real. Reset ledger conserva idempotencia,
+compras e historial; campo resets opcional compatible con carteras anteriores.
+Admin sólo lee: no inicia resets. Userconfirma deploy2.2.0; esta correcciónlocal
+requiere desplegar Nest luego React2.2.1, sin nuevasvariables/MySQL/seed.
+
 Trainer Battle autorizado 2026-11-11 amplía /pvp: mode:'trainer', preset Kanto
 servidor, players sólo a humano y trainer descriptor+team (team sólo admin).
 create acepta playerAId+trainerPresetId exclusivamente de playerBId. Reserva/

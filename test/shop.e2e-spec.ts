@@ -67,6 +67,11 @@ const input = (overrides: Record<string, any> = {}) => ({
   expectedWalletRevision: 0,
   ...overrides,
 });
+const resetInput = (overrides: Record<string, any> = {}) => ({
+  requestId: 'reset-1',
+  expectedWalletRevision: 0,
+  ...overrides,
+});
 
 describe('Authoritative Pokedollars and purchases', () => {
   let auth: ReturnType<typeof fakeAuth>,
@@ -443,6 +448,287 @@ describe('Authoritative Pokedollars and purchases', () => {
     expect(restored.purchases[0].status).toBe('pending');
     expect(restored.wallet.items['poke-ball']).toBe(1);
   });
+  it('resets spent money and purchased items atomically, keeps purchase history and never replenishes on replay', async () => {
+    const purchase = (await service.purchase(clients[1], input())).purchases[0];
+    await service.applied(clients[2], {
+      purchaseId: purchase.purchaseId,
+      revision: 1,
+    });
+    await service.presence(clients[2], { ready: false, localBattle: false });
+    const reset = await service.reset(
+      clients[2],
+      resetInput({ expectedWalletRevision: 1 }),
+    );
+    expect(reset.wallet).toMatchObject({
+      balance: 500,
+      items: {},
+      revision: 2,
+    });
+    expect(reset.reset).toEqual({
+      requestId: 'reset-1',
+      userId: 2,
+      clientId: 'shop-client-2',
+      walletRevision: 2,
+      status: 'pending',
+    });
+    expect(reset.purchases).toHaveLength(1);
+    expect(reset.purchases[0].status).toBe('applied');
+    expect(await activity.busyUsers([2])).toEqual([2]);
+    const duplicate = await service.reset(
+      clients[2],
+      resetInput({ expectedWalletRevision: 1 }),
+    );
+    expect(duplicate.wallet.revision).toBe(2);
+    expect((await repo.get(2)).resets).toHaveLength(1);
+    const applied = await service.resetApplied(clients[2], {
+      requestId: 'reset-1',
+      revision: 2,
+    });
+    expect(applied.resets[0].status).toBe('applied');
+    expect(applied.wallet.revision).toBe(2);
+    expect(await activity.busyUsers([2])).toEqual([]);
+    await service.presence(clients[2], { ready: true, localBattle: false });
+    await service.purchase(
+      clients[1],
+      input({ requestId: 'purchase-after-reset', expectedWalletRevision: 2 }),
+    );
+    expect(
+      (
+        await service.reset(
+          clients[2],
+          resetInput({ expectedWalletRevision: 1 }),
+        )
+      ).wallet.balance,
+    ).toBe(350);
+    expect(
+      (
+        await service.resetApplied(clients[2], {
+          requestId: 'reset-1',
+          revision: 2,
+        })
+      ).wallet.balance,
+    ).toBe(350);
+    expect((await repo.get(2)).purchases).toHaveLength(2);
+  });
+  it('accepts only own authenticated reset intent, exact revision and valid idempotency payload', async () => {
+    await expect(service.reset(clients[1], resetInput())).rejects.toMatchObject(
+      { code: 'PLAYER_REQUIRED' },
+    );
+    for (const extra of [{ userId: 3 }, { balance: 5000 }, { items: {} }])
+      await expect(
+        service.reset(clients[2], resetInput(extra)),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(
+      service.reset(clients[2], resetInput({ expectedWalletRevision: 1 })),
+    ).rejects.toMatchObject({ code: 'WALLET_CONFLICT' });
+    await service.presence(clients[2], { ready: true, localBattle: true });
+    await expect(service.reset(clients[2], resetInput())).rejects.toMatchObject(
+      { code: 'PLAYER_IN_BATTLE' },
+    );
+    await service.presence(clients[2], { ready: false, localBattle: false });
+    await service.reset(clients[2], resetInput());
+    await expect(
+      service.reset(clients[2], resetInput({ expectedWalletRevision: 1 })),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await expect(
+      service.reset(clients[2], resetInput({ requestId: 'different-reset' })),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    expect((await repo.get(2)).resets).toHaveLength(1);
+  });
+  it('recovers pending reset after process restart, exposes it to alternate devices and requires original client ACK', async () => {
+    await service.reset(clients[2], resetInput());
+    service = new ShopService(repo, auth as any, activity);
+    await service.onModuleInit();
+    const alternate = {
+      ...clients[2],
+      socketId: 'alternate-socket',
+      clientId: 'alternate-client',
+    };
+    service.connect(alternate);
+    expect((await service.sync(alternate)).resets[0]).toMatchObject({
+      requestId: 'reset-1',
+      clientId: 'shop-client-2',
+      status: 'pending',
+    });
+    await expect(
+      service.resetApplied(alternate, { requestId: 'reset-1', revision: 1 }),
+    ).rejects.toMatchObject({ code: 'OWNER_REQUIRED' });
+    service.connect(clients[2]);
+    service.connect(clients[3]);
+    expect((await service.sync(clients[3])).resets).toEqual([]);
+    await expect(
+      service.resetApplied(clients[2], { requestId: 'reset-1', revision: 99 }),
+    ).rejects.toMatchObject({ code: 'WALLET_CONFLICT' });
+    expect(
+      (await service.reset(clients[2], resetInput())).wallet.revision,
+    ).toBe(1);
+    expect(
+      (
+        await service.resetApplied(clients[2], {
+          requestId: 'reset-1',
+          revision: 1,
+        })
+      ).resets[0].status,
+    ).toBe('applied');
+    expect((await repo.get(2)).storageRevision).toBe(2);
+  });
+  it.each(['pvp', 'trainer'])(
+    'excludes reset and %s reservation until durable reset ACK',
+    async (kind) => {
+      const payload =
+        kind === 'trainer'
+          ? {
+              commandId: 'reset-battle',
+              playerAId: 2,
+              trainerPresetId: 'kanto-brock',
+            }
+          : { commandId: 'reset-battle', playerAId: 2, playerBId: 3 };
+      const battle = await pvp.create(clients[1], payload);
+      await expect(
+        service.reset(clients[2], resetInput()),
+      ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+      await pvp.cancel(clients[1], {
+        battleId: battle.battleId,
+        hostEpoch: battle.host.epoch,
+      });
+      await service.reset(clients[2], resetInput());
+      const admin = await service.sync(clients[1]);
+      expect(
+        admin.players.find((player) => player.user.id === 2),
+      ).toMatchObject({ pending: true, pendingReset: true });
+      await expect(
+        pvp.create(clients[1], { ...payload, commandId: 'after-reset-battle' }),
+      ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+      await expect(
+        service.purchase(clients[1], input({ expectedWalletRevision: 1 })),
+      ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+      await service.resetApplied(clients[2], {
+        requestId: 'reset-1',
+        revision: 1,
+      });
+      expect(
+        (
+          await pvp.create(clients[1], {
+            ...payload,
+            commandId: 'after-reset-battle',
+          })
+        ).phase,
+      ).toBe('collecting');
+    },
+  );
+  it.each(['reset-first', 'purchase-first'])(
+    'serializes a concurrent purchase/reset with exactly one commit: %s',
+    async (order) => {
+      const operations =
+        order === 'reset-first'
+          ? [
+              () => service.reset(clients[2], resetInput()),
+              () => service.purchase(clients[1], input()),
+            ]
+          : [
+              () => service.purchase(clients[1], input()),
+              () => service.reset(clients[2], resetInput()),
+            ];
+      const outcomes = await Promise.allSettled(
+        operations.map((operation) => operation()),
+      );
+      expect(
+        outcomes.filter((outcome) => outcome.status === 'fulfilled'),
+      ).toHaveLength(1);
+      expect((outcomes[1] as PromiseRejectedResult).reason.code).toBe(
+        'PLAYER_BUSY',
+      );
+      const row = await repo.get(2);
+      expect(row.revision).toBe(1);
+      expect(row.purchases.length + row.resets.length).toBe(1);
+    },
+  );
+  it('fences reset against disconnect or session changes during asynchronous authentication', async () => {
+    const original = auth.authenticate.bind(auth);
+    auth.authenticate = async (token) => {
+      const identity = await original(token);
+      service.disconnect(clients[2].socketId);
+      return identity;
+    };
+    await expect(service.reset(clients[2], resetInput())).rejects.toMatchObject(
+      { code: 'SESSION_CHANGED' },
+    );
+    expect((await repo.get(2)).resets).toEqual([]);
+    auth.authenticate = original;
+    service.connect(clients[2]);
+    auth.users.get(2).role = 'admin';
+    await expect(service.reset(clients[2], resetInput())).rejects.toMatchObject(
+      { code: 'INVALID_PLAYER' },
+    );
+    expect((await repo.get(2)).revision).toBe(0);
+  });
+  it('CAS retries preserve history and failed reset writes never report a reset', async () => {
+    const original = repo.compareAndSwap.bind(repo);
+    repo.compareAndSwap = async () => {
+      throw new Error('Reset DB unavailable');
+    };
+    await expect(service.reset(clients[2], resetInput())).rejects.toThrow(
+      'Reset DB unavailable',
+    );
+    expect((await repo.get(2)).resets).toEqual([]);
+    let calls = 0;
+    repo.compareAndSwap = async (...args) =>
+      ++calls === 1 ? false : original(...args);
+    expect(
+      (await service.reset(clients[2], resetInput())).wallet,
+    ).toMatchObject({ revision: 1, balance: 500, items: {} });
+    expect(calls).toBe(2);
+    expect((await repo.get(2)).resets).toHaveLength(1);
+  });
+  it('cancellation persists a terminal tombstone that fences a late reset, without releasing a committed reset', async () => {
+    const cancelled = await service.resetCancel(clients[2], resetInput());
+    expect(cancelled.reset).toMatchObject({
+      status: 'cancelled',
+      walletRevision: 0,
+    });
+    expect(cancelled.wallet).toMatchObject({
+      balance: 500,
+      revision: 0,
+      items: {},
+    });
+    expect(await activity.busyUsers([2])).toEqual([]);
+    const late = await service.reset(clients[2], resetInput());
+    expect(late.reset.status).toBe('cancelled');
+    expect(late.wallet.revision).toBe(0);
+    expect((await repo.get(2)).resets).toHaveLength(1);
+    const live = resetInput({ requestId: 'committed-reset' });
+    await service.reset(clients[2], live);
+    expect((await service.resetCancel(clients[2], live)).reset.status).toBe(
+      'pending',
+    );
+    expect(await activity.busyUsers([2])).toEqual([2]);
+    await service.resetApplied(clients[2], {
+      requestId: 'committed-reset',
+      revision: 1,
+    });
+    expect((await service.resetCancel(clients[2], live)).reset.status).toBe(
+      'applied',
+    );
+  });
+  it('cancelled reset requests cannot be retargeted, cannot be acknowledged, and survive process restarts', async () => {
+    await service.resetCancel(clients[2], resetInput());
+    service = new ShopService(repo, auth as any, activity);
+    await service.onModuleInit();
+    service.connect(clients[2]);
+    await expect(
+      service.resetCancel(
+        clients[2],
+        resetInput({ expectedWalletRevision: 10 }),
+      ),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await expect(
+      service.resetApplied(clients[2], { requestId: 'reset-1', revision: 1 }),
+    ).rejects.toMatchObject({ code: 'RESET_CANCELLED' });
+    expect((await service.reset(clients[2], resetInput())).reset.status).toBe(
+      'cancelled',
+    );
+    expect((await repo.get(2)).revision).toBe(0);
+  });
 });
 
 describe('Shop Socket.IO authenticated namespace', () => {
@@ -531,5 +817,88 @@ describe('Shop Socket.IO authenticated namespace', () => {
     expect((await emit(player, 'shop:sync', {})).error.code).toBe(
       'SESSION_REVOKED',
     );
+  });
+  it('authenticates reset intents and publishes pending/completed resets without exposing another account receipt', async () => {
+    const admin = await connect(1),
+      player = await connect(2),
+      other = await connect(3);
+    await emit(player, 'shop:sync', {});
+    expect((await emit(admin, 'shop:reset', resetInput())).error.code).toBe(
+      'PLAYER_REQUIRED',
+    );
+    const reset = await emit(player, 'shop:reset', resetInput());
+    expect(reset.ok).toBe(true);
+    expect(reset.reset).toMatchObject({
+      requestId: 'reset-1',
+      status: 'pending',
+    });
+    expect(
+      (await emit(admin, 'shop:sync', {})).players.find(
+        (entry) => entry.user.id === 2,
+      ).pendingReset,
+    ).toBe(true);
+    expect((await emit(other, 'shop:sync', {})).resets).toEqual([]);
+    const applied = await emit(player, 'shop:reset-applied', {
+      requestId: 'reset-1',
+      revision: 1,
+    });
+    expect(applied.ok).toBe(true);
+    expect(applied.resets[0].status).toBe('applied');
+    expect(
+      (await emit(admin, 'shop:sync', {})).players.find(
+        (entry) => entry.user.id === 2,
+      ).pending,
+    ).toBe(false);
+    auth.users.delete(2);
+    expect(
+      (
+        await emit(
+          player,
+          'shop:reset',
+          resetInput({ requestId: 'second', expectedWalletRevision: 1 }),
+        )
+      ).error.code,
+    ).toBe('SESSION_REVOKED');
+  });
+  it('publishes cancellation receipts and refuses execution of the same request afterwards', async () => {
+    const player = await connect(2);
+    await emit(player, 'shop:sync', {});
+    const cancelled = await emit(player, 'shop:reset-cancel', resetInput());
+    expect(cancelled.ok).toBe(true);
+    expect(cancelled.reset.status).toBe('cancelled');
+    expect((await emit(player, 'shop:reset', resetInput())).reset.status).toBe(
+      'cancelled',
+    );
+    expect((await emit(player, 'shop:sync', {})).wallet.revision).toBe(0);
+  });
+  it('a cancel fences a reset whose gateway authentication completes later', async () => {
+    const player = await connect(2);
+    await emit(player, 'shop:sync', {});
+    const original = auth.authenticate.bind(auth);
+    let entered: () => void;
+    let release: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const finish = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holdNext = true;
+    auth.authenticate = async (token) => {
+      const identity = await original(token);
+      if (token === 'shop-user-2' && holdNext) {
+        holdNext = false;
+        entered();
+        await finish;
+      }
+      return identity;
+    };
+    const late = emit(player, 'shop:reset', resetInput());
+    await started;
+    const cancelled = await emit(player, 'shop:reset-cancel', resetInput());
+    expect(cancelled.reset.status).toBe('cancelled');
+    release();
+    expect((await late).reset.status).toBe('cancelled');
+    expect((await emit(player, 'shop:sync', {})).wallet.revision).toBe(0);
   });
 });

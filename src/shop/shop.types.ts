@@ -36,9 +36,19 @@ export type StoredPurchase = Purchase & {
   requestHash: string;
   createdAt?: number;
 };
+export type GameReset = {
+  requestId: string;
+  userId: number;
+  clientId: string;
+  walletRevision: number;
+  status: 'pending' | 'applied' | 'cancelled';
+};
+export type StoredGameReset = GameReset & { requestHash: string };
 export type WalletRecord = Wallet & {
   storageRevision: number;
   purchases: StoredPurchase[];
+  // Absent on wallets created before game reset support.
+  resets?: StoredGameReset[];
 };
 export type ShopActor = Actor & { ready: boolean; localBattle: boolean };
 export type ShopPlayer = {
@@ -49,11 +59,14 @@ export type ShopPlayer = {
   inBattle: boolean;
   wallet: Wallet | null;
   pending: boolean;
+  pendingReset?: boolean;
 };
 export type ShopState = {
   wallet?: Wallet;
   players?: ShopPlayer[];
   purchases?: Purchase[];
+  resets?: GameReset[];
+  reset?: GameReset;
 };
 export class ShopError extends Error {
   constructor(
@@ -79,4 +92,8 @@ export function walletView(record: WalletRecord): Wallet {
 export function purchaseView(record: StoredPurchase): Purchase {
   const { requestHash: _, createdAt: __, ...purchase } = record;
   return clone(purchase);
+}
+export function resetView(record: StoredGameReset): GameReset {
+  const { requestHash: _, ...reset } = record;
+  return clone(reset);
 }
