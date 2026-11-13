@@ -4,6 +4,11 @@ import {
   ShopWalletSchema,
 } from '../src/shop/shop.repository';
 import { WalletRecord } from '../src/shop/shop.types';
+import {
+  MongoShopCatalogRepository,
+  ShopCatalogSchema,
+} from '../src/shop/shop-catalog.repository';
+import { SHOP_CATALOG } from '../src/shop/shop.types';
 const {
   createMongooseShopFixture,
 } = require('./support/mongoose-shop-model.cjs');
@@ -28,6 +33,58 @@ describe('Mongo wallet atomic replacement (real Mongoose, fake driver)', () => {
     repository = new MongoShopRepository(fixture.model);
   });
   afterEach(() => fixture.dispose());
+  it('persists a zero-price catalog and its revision using real Mongoose CAS', async () => {
+    const catalogFixture = createMongooseShopFixture({
+      mongoose,
+      schema: ShopCatalogSchema,
+    });
+    try {
+      const catalog = new MongoShopCatalogRepository(catalogFixture.model);
+      await catalog.ready();
+      const record = { revision: 0, prices: { ...SHOP_CATALOG }, changes: [] };
+      expect(await catalog.insert(record)).toBe(true);
+      const updated = {
+        ...record,
+        revision: 1,
+        prices: { ...record.prices, tm: 0 },
+      };
+      expect(await catalog.compareAndSwap(updated, 0)).toBe(true);
+      expect(await catalog.compareAndSwap(record, 0)).toBe(false);
+      expect(await catalog.get()).toEqual(updated);
+    } finally {
+      await catalogFixture.dispose();
+    }
+  });
+  it('persists adjustment receipts and finds an admin ledger without any purchases', async () => {
+    const row = wallet();
+    row.balance = 750;
+    row.revision = 1;
+    row.storageRevision = 1;
+    row.adjustments = [
+      {
+        adjustmentId: 'balance-id',
+        requestId: 'balance-request',
+        adminUserId: 1,
+        userId: 2,
+        clientId: 'client',
+        delta: 250,
+        balanceBefore: 500,
+        balanceAfter: 750,
+        walletRevision: 1,
+        status: 'pending',
+        requestHash: 'hash',
+      },
+    ];
+    await repository.insert(row);
+    expect((await repository.forAdmin(1))[0].adjustments).toEqual(
+      row.adjustments,
+    );
+    const restored = await repository.get(2);
+    restored.adjustments[0].status = 'applied';
+    restored.storageRevision++;
+    expect(await repository.compareAndSwap(restored, 1)).toBe(true);
+    expect((await repository.get(2)).adjustments[0].status).toBe('applied');
+  });
   it('preserves pending/applied TM receipts, learned move and zero stock through Mongoose replacement', async () => {
     await repository.insert(wallet());
     const row = wallet();

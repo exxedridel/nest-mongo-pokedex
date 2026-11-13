@@ -12,6 +12,27 @@ export const SHOP_CATALOG = {
   bicycle: 1200,
 } as const;
 export type ShopItemId = keyof typeof SHOP_CATALOG;
+export const MAX_SHOP_PRICE = Math.floor(Number.MAX_SAFE_INTEGER / 99);
+export type ShopCatalog = {
+  revision: number;
+  prices: Record<ShopItemId, number>;
+};
+export type BalanceAdjustment = {
+  adjustmentId: string;
+  requestId: string;
+  adminUserId: number;
+  userId: number;
+  clientId: string;
+  delta: number;
+  balanceBefore: number;
+  balanceAfter: number;
+  walletRevision: number;
+  status: 'pending' | 'applied';
+};
+export type StoredBalanceAdjustment = BalanceAdjustment & {
+  requestHash: string;
+  createdAt?: number;
+};
 export const CONSUMABLE_ITEM_IDS = [
   'full-restore',
   'max-ether',
@@ -75,6 +96,7 @@ export type WalletRecord = Wallet & {
   // Absent on wallets created before game reset support.
   resets?: StoredGameReset[];
   uses?: StoredItemUse[];
+  adjustments?: StoredBalanceAdjustment[];
   battleUses?: {
     key: string;
     battleId: string;
@@ -94,8 +116,12 @@ export type ShopPlayer = {
   pending: boolean;
   pendingReset?: boolean;
   pendingUse?: boolean;
+  pendingAdjustment?: boolean;
 };
 export type ShopState = {
+  catalog?: ShopCatalog;
+  adjustment?: BalanceAdjustment;
+  adjustments?: BalanceAdjustment[];
   wallet?: Wallet;
   players?: ShopPlayer[];
   purchases?: Purchase[];

@@ -1,12 +1,15 @@
-import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, OnModuleInit, Optional } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { AuthIdentityService } from '../messages/auth-identity.service';
 import { PlayerActivityService } from '../messages/player-activity.service';
 import { Actor } from '../pvp/pvp.types';
 import { digest } from '../pvp/pvp.validation';
 import { SHOP_REPOSITORY, ShopRepository } from './shop.repository';
+import { ShopCatalogService } from './shop-catalog.service';
+import { MemoryShopCatalogRepository } from './shop-catalog.repository';
 import {
   clone,
+  BalanceAdjustment,
   CONSUMABLE_ITEM_IDS,
   ConsumableItemId,
   fail,
@@ -55,6 +58,7 @@ export class ShopService implements OnModuleInit {
       playerUserId: number;
       clientId: string;
       expectedWalletRevision: number;
+      operation?: 'balance-adjustment';
     },
   ) => Promise<{
     ok: boolean;
@@ -65,9 +69,14 @@ export class ShopService implements OnModuleInit {
     @Inject(SHOP_REPOSITORY) readonly repository: ShopRepository,
     private readonly auth: AuthIdentityService,
     private readonly activity: PlayerActivityService,
+    @Optional()
+    readonly catalog: ShopCatalogService = new ShopCatalogService(
+      new MemoryShopCatalogRepository(),
+    ),
   ) {}
   async onModuleInit() {
     await this.repository.ready();
+    await this.catalog.onModuleInit();
     this.activity.register('shop', async (userIds) => {
       const rows = await Promise.all(
         userIds.map((userId) => this.repository.get(userId)),
@@ -77,7 +86,10 @@ export class ShopService implements OnModuleInit {
           (row) =>
             row?.purchases.some((purchase) => purchase.status === 'pending') ||
             row?.resets?.some((reset) => reset.status === 'pending') ||
-            row?.uses?.some((use) => use.status === 'pending'),
+            row?.uses?.some((use) => use.status === 'pending') ||
+            row?.adjustments?.some(
+              (adjustment) => adjustment.status === 'pending',
+            ),
         )
         .map((row) => row.userId);
     });
@@ -231,11 +243,32 @@ export class ShopService implements OnModuleInit {
     );
   }
   private async state(actor: Actor, payload: any = {}): Promise<ShopState> {
-    object(payload, []);
+    object(payload, ['adjustmentRequestId']);
+    if (payload.adjustmentRequestId !== undefined)
+      id(payload.adjustmentRequestId);
     this.self(actor);
+    const catalog = await this.catalog.snapshot();
     if (actor.user.role === 'player') {
       const row = await this.ensureWallet(actor.user.id);
       return {
+        catalog,
+        ...(payload.adjustmentRequestId &&
+        row.adjustments?.some(
+          (entry) => entry.requestId === payload.adjustmentRequestId,
+        )
+          ? {
+              adjustment: (() => {
+                const {
+                  requestHash: _,
+                  createdAt: __,
+                  ...receipt
+                } = row.adjustments.find(
+                  (entry) => entry.requestId === payload.adjustmentRequestId,
+                );
+                return receipt;
+              })(),
+            }
+          : {}),
         wallet: walletView(row),
         purchases: row.purchases
           .filter((purchase) => purchase.clientId === actor.clientId)
@@ -257,6 +290,16 @@ export class ShopService implements OnModuleInit {
             .filter((use) => use.status !== 'pending')
             .slice(-50),
         ].map(useView),
+        adjustments: (row.adjustments ?? [])
+          .filter((adjustment) => adjustment.status === 'pending')
+          .concat(
+            (row.adjustments ?? [])
+              .filter((adjustment) => adjustment.status !== 'pending')
+              .slice(-50),
+          )
+          .map(
+            ({ requestHash: _, createdAt: __, ...adjustment }) => adjustment,
+          ),
       };
     }
     this.admin(actor);
@@ -300,6 +343,9 @@ export class ShopService implements OnModuleInit {
       const pendingUse = !!wallet?.uses?.some(
         (use) => use.status === 'pending',
       );
+      const pendingAdjustment = !!wallet?.adjustments?.some(
+        (adjustment) => adjustment.status === 'pending',
+      );
       players.push({
         user: clone(valid.user),
         clientId: candidate.clientId,
@@ -307,13 +353,15 @@ export class ShopService implements OnModuleInit {
         ready: current.ready,
         inBattle: current.localBattle || busy.has(candidate.user.id),
         wallet: wallet ? walletView(wallet) : null,
-        pending: pending || pendingReset || pendingUse,
+        pending: pending || pendingReset || pendingUse || pendingAdjustment,
         pendingReset,
         pendingUse,
+        pendingAdjustment,
       });
     }
     const rows = await this.repository.forAdmin(actor.user.id);
     return {
+      catalog,
       players,
       purchases: rows
         .flatMap((row) => row.purchases)
@@ -321,6 +369,12 @@ export class ShopService implements OnModuleInit {
         .sort((left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0))
         .slice(-50)
         .map(purchaseView),
+      adjustments: rows
+        .flatMap((row) => row.adjustments ?? [])
+        .filter((adjustment) => adjustment.adminUserId === actor.user.id)
+        .sort((left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0))
+        .slice(-50)
+        .map(({ requestHash: _, createdAt: __, ...adjustment }) => adjustment),
     };
   }
   async purchase(actor: Actor, payload: any): Promise<ShopState> {
@@ -332,28 +386,32 @@ export class ShopService implements OnModuleInit {
       'itemId',
       'quantity',
       'expectedWalletRevision',
+      'expectedCatalogRevision',
     ]);
     id(payload.requestId);
     id(payload.clientId);
     integer(payload.playerUserId, 1);
     integer(payload.quantity, 1, 99);
     integer(payload.expectedWalletRevision);
+    if (payload.expectedCatalogRevision !== undefined)
+      integer(payload.expectedCatalogRevision);
     if (
       typeof payload.itemId !== 'string' ||
       !Object.prototype.hasOwnProperty.call(SHOP_CATALOG, payload.itemId)
     )
       fail('INVALID_ITEM', 'Ese objeto no está disponible en Poké Mart.');
     const itemId = payload.itemId as ShopItemId;
-    const unitPrice = SHOP_CATALOG[itemId];
-    const total = unitPrice * payload.quantity;
-    const hash = digest([
+    const fingerprint = [
       actor.user.id,
       payload.playerUserId,
       payload.clientId,
       itemId,
       payload.quantity,
       payload.expectedWalletRevision,
-    ]);
+    ];
+    if (payload.expectedCatalogRevision !== undefined)
+      fingerprint.push(payload.expectedCatalogRevision);
+    const hash = digest(fingerprint);
     await this.activity.runExclusive([payload.playerUserId], async () => {
       this.admin(actor);
       const prior = (await this.repository.forAdmin(actor.user.id))
@@ -391,6 +449,9 @@ export class ShopService implements OnModuleInit {
             );
           return;
         }
+        const quote = await this.catalog.quote(payload.expectedCatalogRevision);
+        const unitPrice = quote.prices[itemId];
+        const total = unitPrice * payload.quantity;
         await this.activity.assertAvailable([payload.playerUserId]);
         const candidate = this.current(payload.playerUserId);
         if (!candidate || candidate.clientId !== payload.clientId)
@@ -525,7 +586,12 @@ export class ShopService implements OnModuleInit {
           requestHash: hash,
           createdAt: Date.now(),
         });
-        if (!(await this.repository.compareAndSwap(row, previous))) continue;
+        if (
+          !(await this.catalog.commit(quote.revision, () =>
+            this.repository.compareAndSwap(row, previous),
+          ))
+        )
+          continue;
         this.activity.changed();
         return;
       }
@@ -535,6 +601,287 @@ export class ShopService implements OnModuleInit {
       );
     });
     return this.sync(actor, {});
+  }
+  async priceSet(actor: Actor, payload: any): Promise<ShopState> {
+    this.admin(actor);
+    await this.catalog.setPrice(actor.user.id, payload, async () => {
+      const verified = await this.auth.authenticate(actor.token);
+      this.admin(actor);
+      if (verified.user.id !== actor.user.id || verified.user.role !== 'admin')
+        fail('ADMIN_REQUIRED', 'La cuenta ya no puede modificar precios.');
+    });
+    this.activity.changed();
+    return this.sync(actor, {});
+  }
+  async balanceAdjust(actor: Actor, payload: any): Promise<ShopState> {
+    this.admin(actor);
+    object(payload, [
+      'requestId',
+      'playerUserId',
+      'clientId',
+      'delta',
+      'expectedWalletRevision',
+    ]);
+    id(payload.requestId);
+    id(payload.clientId);
+    integer(payload.playerUserId, 1);
+    integer(payload.expectedWalletRevision);
+    integer(payload.delta, -Number.MAX_SAFE_INTEGER);
+    if (payload.delta === 0)
+      fail('INVALID_INPUT', 'Indica una cantidad distinta de cero.');
+    const hash = digest([
+      actor.user.id,
+      payload.playerUserId,
+      payload.clientId,
+      payload.delta,
+      payload.expectedWalletRevision,
+    ]);
+    const view = (
+      entry: import('./shop.types').StoredBalanceAdjustment,
+    ): BalanceAdjustment => {
+      const { requestHash: _, createdAt: __, ...adjustment } = entry;
+      return adjustment;
+    };
+    const adjustment = await this.activity.runExclusive(
+      [payload.playerUserId],
+      async (): Promise<BalanceAdjustment> => {
+        this.admin(actor);
+        const prior = (await this.repository.forAdmin(actor.user.id))
+          .flatMap((row) => row.adjustments ?? [])
+          .find(
+            (entry) =>
+              entry.adminUserId === actor.user.id &&
+              entry.requestId === payload.requestId,
+          );
+        if (prior) {
+          if (prior.requestHash !== hash)
+            fail(
+              'REQUEST_CONFLICT',
+              'La solicitud corresponde a otro ajuste de saldo.',
+            );
+          return view(prior);
+        }
+        for (let attempt = 0; attempt < 20; attempt++) {
+          this.admin(actor);
+          const row = await this.repository.get(payload.playerUserId);
+          if (!row)
+            fail(
+              'PLAYER_OFFLINE',
+              'El jugador todavía no sincroniza sus Pokedollars.',
+            );
+          const replay = row.adjustments?.find(
+            (entry) =>
+              entry.adminUserId === actor.user.id &&
+              entry.requestId === payload.requestId,
+          );
+          if (replay) {
+            if (replay.requestHash !== hash)
+              fail(
+                'REQUEST_CONFLICT',
+                'La solicitud corresponde a otro ajuste de saldo.',
+              );
+            return view(replay);
+          }
+          await this.activity.assertAvailable([payload.playerUserId]);
+          const owner = this.current(payload.playerUserId);
+          if (!owner || owner.clientId !== payload.clientId)
+            fail(
+              'PLAYER_OFFLINE',
+              'El jugador cambió de conexión. Selecciónalo nuevamente.',
+            );
+          if (!owner.ready)
+            fail(
+              'PLAYER_NOT_READY',
+              'Espera a que el jugador sincronice su partida.',
+            );
+          if (owner.localBattle)
+            fail(
+              'PLAYER_IN_BATTLE',
+              'Termina la batalla antes de ajustar Pokedollars.',
+            );
+          const [identity, contacts] = await Promise.all([
+            this.auth.authenticate(owner.token),
+            this.auth.contacts(actor.token, actor.user.id),
+          ]);
+          if (
+            identity.user.id !== payload.playerUserId ||
+            identity.user.role !== 'player' ||
+            !contacts.some(
+              (contact) =>
+                contact.id === payload.playerUserId &&
+                contact.role === 'player',
+            )
+          )
+            fail(
+              'INVALID_PLAYER',
+              'La cuenta seleccionada ya no es un jugador vigente.',
+            );
+          const connected = this.current(payload.playerUserId);
+          if (
+            !connected ||
+            connected.socketId !== owner.socketId ||
+            connected.clientId !== payload.clientId ||
+            !connected.ready ||
+            connected.localBattle
+          )
+            fail(
+              'PLAYER_NOT_READY',
+              'La conexión o batalla del jugador cambió.',
+            );
+          if (row.revision !== payload.expectedWalletRevision)
+            fail(
+              'WALLET_CONFLICT',
+              'El saldo cambió. Actualiza y confirma nuevamente el ajuste.',
+            );
+          const balanceAfter = row.balance + payload.delta;
+          if (balanceAfter < 0)
+            fail(
+              'INSUFFICIENT_FUNDS',
+              'No puedes retirar más Pokedollars de los disponibles.',
+            );
+          if (!Number.isSafeInteger(balanceAfter))
+            fail('BALANCE_LIMIT', 'El saldo supera el límite permitido.');
+          if ((row.adjustments?.length ?? 0) >= 4096)
+            fail(
+              'ADJUSTMENT_LIMIT',
+              'Se alcanzó el límite de historial de ajustes de esta cuenta.',
+            );
+          if (!this.prepareHandler)
+            fail(
+              'SHOP_UNAVAILABLE',
+              'No se pudo reservar el guardado del jugador.',
+            );
+          const prepared = await this.prepareHandler(connected, {
+            requestId: payload.requestId,
+            playerUserId: payload.playerUserId,
+            clientId: payload.clientId,
+            expectedWalletRevision: payload.expectedWalletRevision,
+            operation: 'balance-adjustment',
+          });
+          if (!prepared?.ok || prepared.revision !== row.revision)
+            fail(
+              'PLAYER_NOT_READY',
+              prepared?.error?.message ??
+                'El jugador no pudo reservar su partida para el ajuste.',
+            );
+          const [player, administrator] = await Promise.all([
+            this.auth.authenticate(owner.token),
+            this.auth.authenticate(actor.token),
+          ]);
+          this.admin(actor);
+          if (
+            administrator.user.id !== actor.user.id ||
+            administrator.user.role !== 'admin'
+          )
+            fail(
+              'ADMIN_REQUIRED',
+              'La cuenta ya no puede ajustar Pokedollars.',
+            );
+          if (
+            player.user.id !== payload.playerUserId ||
+            player.user.role !== 'player'
+          )
+            fail('INVALID_PLAYER', 'La cuenta ya no pertenece al jugador.');
+          const finalOwner = this.current(payload.playerUserId);
+          if (
+            !finalOwner ||
+            finalOwner.socketId !== connected.socketId ||
+            finalOwner.clientId !== payload.clientId ||
+            finalOwner.localBattle
+          )
+            fail(
+              'PLAYER_NOT_READY',
+              'El jugador cambió de conexión o entró en batalla antes de guardar el ajuste.',
+            );
+          const previous = row.storageRevision;
+          const receipt: BalanceAdjustment = {
+            adjustmentId: randomUUID(),
+            requestId: payload.requestId,
+            adminUserId: actor.user.id,
+            userId: payload.playerUserId,
+            clientId: payload.clientId,
+            delta: payload.delta,
+            balanceBefore: row.balance,
+            balanceAfter,
+            walletRevision: row.revision + 1,
+            status: 'pending',
+          };
+          row.balance = balanceAfter;
+          row.revision++;
+          row.storageRevision++;
+          (row.adjustments ??= []).push({
+            ...receipt,
+            requestHash: hash,
+            createdAt: Date.now(),
+          });
+          if (!(await this.repository.compareAndSwap(row, previous))) continue;
+          this.activity.changed();
+          return receipt;
+        }
+        fail(
+          'WALLET_CONFLICT',
+          'Otra operación actualizó el saldo. Sincroniza y reintenta.',
+        );
+      },
+    );
+    return { ...(await this.sync(actor, {})), adjustment };
+  }
+  async balanceApplied(actor: Actor, payload: any): Promise<ShopState> {
+    object(payload, ['adjustmentId', 'revision']);
+    id(payload.adjustmentId);
+    integer(payload.revision, 1);
+    this.self(actor);
+    if (actor.user.role !== 'player')
+      fail(
+        'PLAYER_REQUIRED',
+        'Sólo el propietario puede confirmar el guardado.',
+      );
+    const adjustment = await this.activity.runExclusive(
+      [actor.user.id],
+      async (): Promise<BalanceAdjustment> => {
+        for (let attempt = 0; attempt < 20; attempt++) {
+          this.self(actor);
+          const row = await this.repository.get(actor.user.id);
+          const receipt = row?.adjustments?.find(
+            (entry) => entry.adjustmentId === payload.adjustmentId,
+          );
+          if (
+            !receipt ||
+            receipt.userId !== actor.user.id ||
+            receipt.clientId !== actor.clientId
+          )
+            fail(
+              'OWNER_REQUIRED',
+              'El ajuste pertenece al navegador original de otro jugador.',
+            );
+          if (receipt.walletRevision !== payload.revision)
+            fail(
+              'WALLET_CONFLICT',
+              'La revisión no corresponde al ajuste de Pokedollars.',
+            );
+          const { requestHash: _, createdAt: __, ...view } = receipt;
+          if (receipt.status === 'applied') return view;
+          const owner = this.current(actor.user.id);
+          if (
+            !owner ||
+            owner.socketId !== actor.socketId ||
+            owner.clientId !== receipt.clientId
+          )
+            fail(
+              'OWNER_REQUIRED',
+              'Reconecta el navegador que recibió el ajuste.',
+            );
+          const previous = row.storageRevision;
+          receipt.status = 'applied';
+          row.storageRevision++;
+          if (!(await this.repository.compareAndSwap(row, previous))) continue;
+          this.activity.changed();
+          return { ...view, status: 'applied' };
+        }
+        fail('WALLET_CONFLICT', 'No se pudo confirmar el guardado del ajuste.');
+      },
+    );
+    return { ...(await this.sync(actor, {})), adjustment };
   }
   async applied(actor: Actor, payload: any): Promise<ShopState> {
     object(payload, ['purchaseId', 'revision']);

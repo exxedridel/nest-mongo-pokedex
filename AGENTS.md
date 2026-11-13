@@ -9,7 +9,22 @@ Acuerdo del usuario confirmado el 2026-11-08:
 
 Si esta disponible, leer [la memoria compartida](../PROJECT_MEMORY.md). Este resumen se conserva tambien aqui para sesiones que abran solo este repositorio.
 
-Etapa vigente2026-11-12 React2.5.0: TM consumible500, sólo uso local fuera de
+Etapa vigente2026-11-12 React2.6.0: BackOffice precio0+ y ajustes+/- sólo
+conectados libres. Mongo shop_catalog global CAS/journal/revisión e historial;
+SHOP_CATALOG defaults primera creación, nunca reset. Mutex catálogo cubre revisión
+y walletCAS compra (no PREPARE); expectedCatalogRevision enlaza hash nuevo y
+PRICE_CHANGED impide cobro oculto. Legacy sin revision sólo catálogo0; recibos
+antiguos sin cambios. balanceAdjust usa PREPARE operation balance-adjustment,
+wallet.adjustments pending y ACKbalanceApplied tras checkedwrite; pendiente
+registraActivity y bloquea compras/reset/uso/PvP/Trainer hastaAPPLIED, también
+reinicio. Sync adjustmentRequestId recupera recibo exacto. Adminroles/cliente/
+saldo no negativo/revisión/overflow revalidados. ShopModule.forMongo siempre
+catálogoMongo, memoria sólofixtures. 82Shop/47PvP/29chat/build y BOChromeaislado
+pasan; regresióncompleta Shop/reset/FullRestore/audio/PP/TM/Trainer+BO aprobada.
+Deploy Nest→React sin nuevasvars/MySQL/seed.
+No borrar batallas niwallets; ver memoria/protocolo.
+
+Etapa anterior2026-11-12 React2.5.0: TM consumible500, sólo uso local fuera de
 combate. USABLE_ITEM_IDS/UsableItemId añade tm a ItemUse y parser shop:use/
 use-cancel; exige moveId1..354, contextparty y owner.localBattle=false antesCAS.
 Debita1 con recibo durable, stock0/replay/cancel y planHash exacto. No nuevo DTO

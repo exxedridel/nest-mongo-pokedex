@@ -7,6 +7,24 @@ de dos correos. Las batallas y la Tienda usan los namespaces descritos abajo.
 
 ## Pokedollars y Poké Mart: namespace `/shop`
 
+Desde React2.6.0, `/back-office` administra los precios globales y los ajustes
+de saldo. El catálogo persistente en `shop_catalog` comienza con los valores
+originales y se conserva al reiniciar. `shop:price-set` admite precios enteros
+desde0 y revisión de catálogo. `ShopState.catalog` publica los valores vigentes;
+las compras vinculan `expectedCatalogRevision` y verifican de nuevo el catálogo
+al confirmar la escritura. Un cambio durante PREPARE rechaza la compra sin
+cobro. Los recibos anteriores siguen inmutables; clientes antiguos sin revisión
+sólo pueden iniciar compras mientras el catálogo permanezca en revisión0.
+
+`shop:balance-adjust` requiere admin vigente y jugador conectado fuera de batalla.
+El delta entero puede sumar o restar, nunca dejar saldo negativo. PREPARE guarda
+un lock del navegador, luego CAS persiste saldo y recibo `pending` en el mismo
+documento. `shop:balance-applied` confirma guardado del jugador; la operación
+excluye compras, reinicios, usos y reservas de batalla hasta entonces. `adjustments`
+es opcional en wallets anteriores. Historial/idempotencia sobreviven reinicios;
+no cambia Party/items/PP. `shop:sync {adjustmentRequestId?}` recupera un recibo
+exacto aunque ya no esté en los50 últimos. Una sola réplica Nest.
+
 Nest conserva el saldo y las cantidades compradas en `shop_wallets`, separado
 del guardado general de la Party. Cada cuenta de jugador recibe **500 Pokedollars
 una sola vez**, al crear su wallet con `currencyVersion: 1`. El frontend adopta

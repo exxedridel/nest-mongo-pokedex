@@ -14,6 +14,7 @@ import { validateChoice } from '../src/pvp/pvp.validation';
 import { ShopModule } from '../src/shop/shop.module';
 import { MemoryShopRepository } from '../src/shop/shop.repository';
 import { ShopService } from '../src/shop/shop.service';
+import { ShopCatalogService } from '../src/shop/shop-catalog.service';
 import { clone, ShopError } from '../src/shop/shop.types';
 
 function fakeAuth() {
@@ -103,6 +104,198 @@ describe('Authoritative Pokedollars and purchases', () => {
         ready: true,
         localBattle: false,
       });
+  });
+  const priceInput = (overrides: Record<string, any> = {}) => ({
+    requestId: 'price-change',
+    itemId: 'poke-ball',
+    price: 0,
+    expectedCatalogRevision: 0,
+    ...overrides,
+  });
+  const adjustmentInput = (overrides: Record<string, any> = {}) => ({
+    requestId: 'balance-change',
+    playerUserId: 2,
+    clientId: 'shop-client-2',
+    delta: 250,
+    expectedWalletRevision: 0,
+    ...overrides,
+  });
+  it('persists zero prices across service recreation and fences stale or conflicting updates', async () => {
+    await expect(
+      service.priceSet(clients[2], priceInput()),
+    ).rejects.toMatchObject({ code: 'ADMIN_REQUIRED' });
+    for (const price of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER])
+      await expect(
+        service.priceSet(clients[1], priceInput({ price })),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await service.priceSet(clients[1], priceInput());
+    expect((await service.sync(clients[1])).catalog.prices['poke-ball']).toBe(
+      0,
+    );
+    await service.priceSet(clients[1], priceInput());
+    expect((await service.catalog.snapshot()).revision).toBe(1);
+    await expect(
+      service.priceSet(clients[1], priceInput({ price: 25 })),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    const restarted = new ShopCatalogService(service.catalog.repository);
+    await restarted.onModuleInit();
+    expect((await restarted.snapshot()).prices['poke-ball']).toBe(0);
+    await expect(
+      service.priceSet(clients[1], priceInput({ requestId: 'stale' })),
+    ).rejects.toMatchObject({ code: 'PRICE_CHANGED' });
+  });
+  it('free purchases preserve cash, retain the quantity cap and replay at their original price', async () => {
+    await service.priceSet(clients[1], priceInput());
+    await expect(service.purchase(clients[1], input())).rejects.toMatchObject({
+      code: 'PRICE_CHANGED',
+    });
+    const payload = input({ quantity: 99, expectedCatalogRevision: 1 });
+    await service.purchase(clients[1], payload);
+    const row = await repo.get(2);
+    expect(row.balance).toBe(500);
+    expect(row.items['poke-ball']).toBe(99);
+    expect(row.purchases[0].total).toBe(0);
+    await service.priceSet(
+      clients[1],
+      priceInput({
+        requestId: 'price-2',
+        price: 75,
+        expectedCatalogRevision: 1,
+      }),
+    );
+    await service.purchase(clients[1], payload);
+    expect((await repo.get(2)).purchases).toHaveLength(1);
+    await expect(
+      service.purchase(
+        clients[1],
+        input({
+          requestId: 'too-many',
+          quantity: 100,
+          expectedCatalogRevision: 2,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+  it('rejects a price changed during player preparation without charging', async () => {
+    service.setPrepareHandler(async (_owner, request) => {
+      await service.catalog.setPrice(1, priceInput({ price: 200 }));
+      return { ok: true, revision: request.expectedWalletRevision };
+    });
+    await expect(
+      service.purchase(clients[1], input({ expectedCatalogRevision: 0 })),
+    ).rejects.toMatchObject({ code: 'PRICE_CHANGED' });
+    expect((await repo.get(2)).balance).toBe(500);
+    expect((await repo.get(2)).purchases).toEqual([]);
+  });
+  it('adjusts cash exactly once, fences other operations until saved and preserves inventory', async () => {
+    const adjusted = await service.balanceAdjust(clients[1], adjustmentInput());
+    expect(adjusted.adjustment).toMatchObject({
+      delta: 250,
+      balanceBefore: 500,
+      balanceAfter: 750,
+      status: 'pending',
+    });
+    await service.balanceAdjust(clients[1], adjustmentInput());
+    expect((await repo.get(2)).adjustments).toHaveLength(1);
+    expect((await repo.get(2)).items).toEqual({});
+    await expect(
+      service.purchase(clients[1], input({ expectedWalletRevision: 1 })),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    await expect(
+      service.reset(clients[2], resetInput({ expectedWalletRevision: 1 })),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    await expect(
+      service.balanceAdjust(clients[1], adjustmentInput({ delta: 300 })),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await expect(
+      service.balanceApplied(clients[3], {
+        adjustmentId: adjusted.adjustment.adjustmentId,
+        revision: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'OWNER_REQUIRED' });
+    await service.balanceApplied(clients[2], {
+      adjustmentId: adjusted.adjustment.adjustmentId,
+      revision: 1,
+    });
+    const subtracted = await service.balanceAdjust(
+      clients[1],
+      adjustmentInput({
+        requestId: 'subtract',
+        delta: -750,
+        expectedWalletRevision: 1,
+      }),
+    );
+    expect(subtracted.adjustment.balanceAfter).toBe(0);
+    await service.balanceApplied(clients[2], {
+      adjustmentId: subtracted.adjustment.adjustmentId,
+      revision: 2,
+    });
+    await service.balanceApplied(clients[2], {
+      adjustmentId: subtracted.adjustment.adjustmentId,
+      revision: 2,
+    });
+    expect((await repo.get(2)).revision).toBe(2);
+  });
+  it('rejects negative balances, overflow, player requests, disconnected or battling owners', async () => {
+    await expect(
+      service.balanceAdjust(clients[2], adjustmentInput()),
+    ).rejects.toMatchObject({ code: 'ADMIN_REQUIRED' });
+    for (const delta of [0, 1.5, NaN])
+      await expect(
+        service.balanceAdjust(clients[1], adjustmentInput({ delta })),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(
+      service.balanceAdjust(clients[1], adjustmentInput({ delta: -501 })),
+    ).rejects.toMatchObject({ code: 'INSUFFICIENT_FUNDS' });
+    await expect(
+      service.balanceAdjust(
+        clients[1],
+        adjustmentInput({ delta: Number.MAX_SAFE_INTEGER }),
+      ),
+    ).rejects.toMatchObject({ code: 'BALANCE_LIMIT' });
+    await service.presence(clients[2], { ready: true, localBattle: true });
+    await expect(
+      service.balanceAdjust(clients[1], adjustmentInput()),
+    ).rejects.toMatchObject({ code: 'PLAYER_IN_BATTLE' });
+    service.disconnect(clients[2].socketId);
+    await expect(
+      service.balanceAdjust(clients[1], adjustmentInput()),
+    ).rejects.toMatchObject({ code: 'PLAYER_OFFLINE' });
+    expect((await repo.get(2)).balance).toBe(500);
+  });
+  it('pending balance adjustments survive restart and are visible to alternate browsers', async () => {
+    const adjusted = await service.balanceAdjust(clients[1], adjustmentInput());
+    const restarted = new ShopService(
+      repo,
+      auth as any,
+      new PlayerActivityService(),
+      new ShopCatalogService(service.catalog.repository),
+    );
+    await restarted.onModuleInit();
+    const other = {
+      ...clients[2],
+      socketId: 'alternate',
+      clientId: 'alternate-browser',
+    };
+    restarted.connect(other);
+    expect((await restarted.sync(other)).adjustments[0].status).toBe('pending');
+    restarted.connect(clients[1]);
+    await expect(
+      restarted.balanceAdjust(
+        clients[1],
+        adjustmentInput({
+          clientId: other.clientId,
+          requestId: 'new-adjustment',
+          expectedWalletRevision: 1,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    restarted.connect(clients[2]);
+    await restarted.balanceApplied(clients[2], {
+      adjustmentId: adjusted.adjustment.adjustmentId,
+      revision: 1,
+    });
+    expect((await repo.get(2)).balance).toBe(750);
   });
   it('initializes 500 only once and rejects client-supplied balances or prices', async () => {
     expect((await service.sync(clients[2])).wallet).toMatchObject({

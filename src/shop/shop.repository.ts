@@ -27,6 +27,7 @@ export const ShopWalletSchema = new Schema(
     purchases: { type: [Schema.Types.Mixed], required: true },
     resets: { type: [Schema.Types.Mixed], default: [] },
     uses: { type: [Schema.Types.Mixed], default: [] },
+    adjustments: { type: [Schema.Types.Mixed], default: undefined },
     battleUses: { type: [Schema.Types.Mixed], default: [] },
   },
   {
@@ -38,6 +39,7 @@ export const ShopWalletSchema = new Schema(
 );
 ShopWalletSchema.index({ userId: 1 }, { unique: true });
 ShopWalletSchema.index({ 'purchases.adminUserId': 1 });
+ShopWalletSchema.index({ 'adjustments.adminUserId': 1 });
 
 @Injectable()
 export class MongoShopRepository implements ShopRepository {
@@ -54,7 +56,12 @@ export class MongoShopRepository implements ShopRepository {
   }
   async forAdmin(adminUserId: number) {
     return this.model
-      .find({ 'purchases.adminUserId': adminUserId })
+      .find({
+        $or: [
+          { 'purchases.adminUserId': adminUserId },
+          { 'adjustments.adminUserId': adminUserId },
+        ],
+      })
       .select('-_id')
       .lean<WalletRecord[]>()
       .exec();
@@ -93,8 +100,14 @@ export class MemoryShopRepository implements ShopRepository {
   }
   async forAdmin(adminUserId: number) {
     return clone(
-      [...this.rows.values()].filter((row) =>
-        row.purchases.some((purchase) => purchase.adminUserId === adminUserId),
+      [...this.rows.values()].filter(
+        (row) =>
+          row.purchases.some(
+            (purchase) => purchase.adminUserId === adminUserId,
+          ) ||
+          row.adjustments?.some(
+            (adjustment) => adjustment.adminUserId === adminUserId,
+          ),
       ),
     );
   }

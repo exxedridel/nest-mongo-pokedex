@@ -219,7 +219,10 @@ export class ShopGateway
       | 'resetCancel'
       | 'use'
       | 'useApplied'
-      | 'useCancel',
+      | 'useCancel'
+      | 'priceSet'
+      | 'balanceAdjust'
+      | 'balanceApplied',
     payload: any,
   ) {
     try {
@@ -231,7 +234,8 @@ export class ShopGateway
       const response = this.handleError(socket, error);
       // A failed/aborted preflight must still release its player's local lock
       // through a fresh serialized state. No debit is rolled back on a timeout.
-      if (operation === 'purchase') await this.publish();
+      if (operation === 'purchase' || operation === 'balanceAdjust')
+        await this.publish();
       return response;
     }
   }
@@ -252,6 +256,24 @@ export class ShopGateway
     @MessageBody() payload: any,
   ) {
     return this.run(socket, 'purchase', payload);
+  }
+  @SubscribeMessage('shop:price-set') priceSet(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'priceSet', payload);
+  }
+  @SubscribeMessage('shop:balance-adjust') balanceAdjust(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'balanceAdjust', payload);
+  }
+  @SubscribeMessage('shop:balance-applied') balanceApplied(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'balanceApplied', payload);
   }
   @SubscribeMessage('shop:applied') applied(
     @ConnectedSocket() socket: Socket,
