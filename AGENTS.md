@@ -9,7 +9,16 @@ Acuerdo del usuario confirmado el 2026-11-08:
 
 Si esta disponible, leer [la memoria compartida](../PROJECT_MEMORY.md). Este resumen se conserva tambien aqui para sesiones que abran solo este repositorio.
 
-Etapa vigente2026-11-12 React2.6.0: BackOffice precio0+ y ajustes+/- sólo
+Correcciónvigente2026-11-12 React2.6.1: shop:balance-abort compensa sólo pending
+exacto bajoqueue/CAS, registra cancelled +cancelledWalletRevision/Balance sin
+alterarreceipt original. Adminorigen o cuentaJugadorotro navegadorpermitidos.
+APPLIED/CANCELLED terminales, ACKtardíonorevive. PublicarTODOSpending admin.
+Presence supportsBalanceAdjustments true yACKPREPAREoperation requerido antes
+nuevosajustes; oldrechazado PLAYER_UPDATE_REQUIREDantesdebit. 91Shop47PvP/build
+correctos, distestable; ChromeBOlegacy10000+abort aprobado. Ver memoria para
+regresiónfinal. DeployNest→React yrecarga2.6.1 sin nuevasvars/MySQL/seed.
+
+Etapa anterior2026-11-12 React2.6.0: BackOffice precio0+ y ajustes+/- sólo
 conectados libres. Mongo shop_catalog global CAS/journal/revisión e historial;
 SHOP_CATALOG defaults primera creación, nunca reset. Mutex catálogo cubre revisión
 y walletCAS compra (no PREPARE); expectedCatalogRevision enlaza hash nuevo y

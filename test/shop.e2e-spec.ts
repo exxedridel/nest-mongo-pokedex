@@ -98,11 +98,13 @@ describe('Authoritative Pokedollars and purchases', () => {
     service.setPrepareHandler(async (_actor, request) => ({
       ok: true,
       revision: request.expectedWalletRevision,
+      operation: request.operation,
     }));
     for (const userId of [2, 3])
       await service.presence(clients[userId], {
         ready: true,
         localBattle: false,
+        supportsBalanceAdjustments: true,
       });
   });
   const priceInput = (overrides: Record<string, any> = {}) => ({
@@ -119,6 +121,164 @@ describe('Authoritative Pokedollars and purchases', () => {
     delta: 250,
     expectedWalletRevision: 0,
     ...overrides,
+  });
+  it('requires advertised balance support and an operation-aware PREPARE acknowledgement before changing cash', async () => {
+    await service.presence(clients[2], { ready: true, localBattle: false });
+    const prepare = jest.fn(async () => ({ ok: true, revision: 0 }));
+    service.setPrepareHandler(prepare);
+    await expect(
+      service.balanceAdjust(clients[1], adjustmentInput()),
+    ).rejects.toMatchObject({ code: 'PLAYER_UPDATE_REQUIRED' });
+    expect(prepare).not.toHaveBeenCalled();
+    await service.presence(clients[2], {
+      ready: true,
+      localBattle: false,
+      supportsBalanceAdjustments: true,
+    });
+    await expect(
+      service.balanceAdjust(clients[1], adjustmentInput()),
+    ).rejects.toMatchObject({ code: 'PLAYER_NOT_READY' });
+    expect((await repo.get(2)).balance).toBe(500);
+    expect((await repo.get(2)).adjustments ?? []).toEqual([]);
+  });
+  it('aborts a pending 10000 PD gift once, preserves history and never revives it through a delayed ACK or replay', async () => {
+    const request = adjustmentInput({ delta: 10000 });
+    const created = await service.balanceAdjust(clients[1], request);
+    const adjustmentId = created.adjustment.adjustmentId;
+    expect((await repo.get(2)).balance).toBe(10500);
+    await expect(activity.assertAvailable([2])).rejects.toMatchObject({
+      code: 'PLAYER_BUSY',
+    });
+    const aborted = await service.balanceAbort(clients[1], { adjustmentId });
+    expect(aborted.adjustment).toMatchObject({
+      status: 'cancelled',
+      walletRevision: 1,
+      cancelledWalletRevision: 2,
+      cancelledBalance: 500,
+      delta: 10000,
+    });
+    expect((await repo.get(2)).balance).toBe(500);
+    expect((await repo.get(2)).adjustments).toHaveLength(1);
+    await expect(activity.assertAvailable([2])).resolves.toBeUndefined();
+    await service.balanceAbort(clients[1], { adjustmentId });
+    expect(
+      (await service.balanceApplied(clients[2], { adjustmentId, revision: 1 }))
+        .adjustment.status,
+    ).toBe('cancelled');
+    expect(
+      (await service.balanceAdjust(clients[1], request)).adjustment.status,
+    ).toBe('cancelled');
+    expect((await repo.get(2)).revision).toBe(2);
+    expect((await repo.get(2)).balance).toBe(500);
+  });
+  it('does not undo an already applied adjustment when abort is requested', async () => {
+    const created = await service.balanceAdjust(
+      clients[1],
+      adjustmentInput({ delta: 10000 }),
+    );
+    const adjustmentId = created.adjustment.adjustmentId;
+    await service.balanceApplied(clients[2], { adjustmentId, revision: 1 });
+    expect(
+      (await service.balanceAbort(clients[1], { adjustmentId })).adjustment
+        .status,
+    ).toBe('applied');
+    expect((await repo.get(2)).balance).toBe(10500);
+    expect((await repo.get(2)).revision).toBe(1);
+  });
+  it('allows the affected account to abort from another browser while rejecting other users and administrators', async () => {
+    const created = await service.balanceAdjust(clients[1], adjustmentInput());
+    const adjustmentId = created.adjustment.adjustmentId;
+    await expect(
+      service.balanceAbort(clients[3], { adjustmentId }),
+    ).rejects.toMatchObject({ code: 'OWNER_REQUIRED' });
+    await expect(
+      service.balanceAbort(clients[4], { adjustmentId }),
+    ).rejects.toMatchObject({ code: 'OWNER_REQUIRED' });
+    const alternate = {
+      ...clients[2],
+      clientId: 'alternate-client',
+      socketId: 'alternate-socket',
+    };
+    service.connect(alternate);
+    const result = await service.balanceAbort(alternate, { adjustmentId });
+    expect(result.adjustment.status).toBe('cancelled');
+    expect(result.wallet.balance).toBe(500);
+    expect((await repo.get(2)).items).toEqual({});
+  });
+  it('retries abort CAS without double compensation and rejects a changed canonical balance', async () => {
+    const created = await service.balanceAdjust(
+      clients[1],
+      adjustmentInput({ delta: -250 }),
+    );
+    const adjustmentId = created.adjustment.adjustmentId;
+    jest.spyOn(repo, 'compareAndSwap').mockResolvedValueOnce(false);
+    await service.balanceAbort(clients[1], { adjustmentId });
+    expect((await repo.get(2)).balance).toBe(500);
+    expect((await repo.get(2)).revision).toBe(2);
+    const next = await service.balanceAdjust(
+      clients[1],
+      adjustmentInput({ requestId: 'another', expectedWalletRevision: 2 }),
+    );
+    repo.rows.get(2).balance++;
+    await expect(
+      service.balanceAbort(clients[1], {
+        adjustmentId: next.adjustment.adjustmentId,
+      }),
+    ).rejects.toMatchObject({ code: 'BALANCE_CONFLICT' });
+    expect((await repo.get(2)).adjustments[1].status).toBe('pending');
+  });
+  it('serializes abort against an in-flight applied ACK so only one terminal outcome wins', async () => {
+    const created = await service.balanceAdjust(
+      clients[1],
+      adjustmentInput({ delta: 10000 }),
+    );
+    const adjustmentId = created.adjustment.adjustmentId;
+    const authenticate = auth.authenticate.bind(auth);
+    let release!: () => void, entered!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reached = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    auth.authenticate = async (token) => {
+      if (token === clients[1].token) {
+        entered();
+        await barrier;
+      }
+      return authenticate(token);
+    };
+    const abort = service.balanceAbort(clients[1], { adjustmentId });
+    await reached;
+    const ack = service.balanceApplied(clients[2], {
+      adjustmentId,
+      revision: 1,
+    });
+    release();
+    const results = await Promise.all([abort, ack]);
+    expect(results.map((result) => result.adjustment.status)).toEqual([
+      'cancelled',
+      'cancelled',
+    ]);
+    expect((await repo.get(2)).balance).toBe(500);
+    expect((await repo.get(2)).revision).toBe(2);
+  });
+  it('can abort a persisted pending adjustment after a server restart without requiring its original browser online', async () => {
+    const created = await service.balanceAdjust(clients[1], adjustmentInput());
+    const afterRestart = new ShopService(
+      repo,
+      auth as any,
+      new PlayerActivityService(),
+      new ShopCatalogService(service.catalog.repository),
+    );
+    await afterRestart.onModuleInit();
+    afterRestart.connect(clients[1]);
+    const aborted = await afterRestart.balanceAbort(clients[1], {
+      adjustmentId: created.adjustment.adjustmentId,
+    });
+    expect(aborted.adjustment.status).toBe('cancelled');
+    expect((await repo.get(2)).balance).toBe(500);
+    expect((await repo.get(2)).adjustments[0].cancelledWalletRevision).toBe(2);
   });
   it('persists zero prices across service recreation and fences stale or conflicting updates', async () => {
     await expect(
@@ -1450,6 +1610,60 @@ describe('Shop Socket.IO authenticated namespace', () => {
     });
     return socket;
   }
+  it('rejects legacy balance clients and exposes an authenticated abort event with durable cancellation', async () => {
+    const admin = await connect(1),
+      player = await connect(2),
+      other = await connect(3);
+    const payload = {
+      requestId: 'socket-balance',
+      playerUserId: 2,
+      clientId: 'shop-client-2',
+      delta: 10000,
+      expectedWalletRevision: 0,
+    };
+    await emit(player, 'shop:presence', { ready: true, localBattle: false });
+    expect((await emit(admin, 'shop:balance-adjust', payload)).error.code).toBe(
+      'PLAYER_UPDATE_REQUIRED',
+    );
+    player.on('shop:prepare', (request, ack) =>
+      ack({
+        ok: true,
+        revision: request.expectedWalletRevision,
+        operation: request.operation,
+      }),
+    );
+    await emit(player, 'shop:presence', {
+      ready: true,
+      localBattle: false,
+      supportsBalanceAdjustments: true,
+    });
+    const created = await emit(admin, 'shop:balance-adjust', payload);
+    expect(created.ok).toBe(true);
+    const adjustmentId = created.adjustment.adjustmentId;
+    expect(
+      (await emit(other, 'shop:balance-abort', { adjustmentId })).error.code,
+    ).toBe('OWNER_REQUIRED');
+    const cancelled = await emit(admin, 'shop:balance-abort', { adjustmentId });
+    expect(cancelled.adjustment).toMatchObject({
+      status: 'cancelled',
+      cancelledWalletRevision: 2,
+      cancelledBalance: 500,
+    });
+    expect(
+      (
+        await emit(player, 'shop:balance-applied', {
+          adjustmentId,
+          revision: 1,
+        })
+      ).adjustment.status,
+    ).toBe('cancelled');
+    expect((await emit(player, 'shop:sync', {})).wallet.balance).toBe(500);
+    const selected = (await emit(admin, 'shop:sync', {})).players.find(
+      (entry) => entry.user.id === 2,
+    );
+    expect(selected.pendingAdjustment).toBe(false);
+    expect(selected.supportsBalanceAdjustments).toBe(true);
+  });
   it('authenticates, broadcasts wallets privately and performs owner preflight before a persisted purchase', async () => {
     const admin = await connect(1),
       player = await connect(2),

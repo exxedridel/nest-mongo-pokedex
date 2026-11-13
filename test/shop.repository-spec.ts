@@ -85,6 +85,36 @@ describe('Mongo wallet atomic replacement (real Mongoose, fake driver)', () => {
     expect(await repository.compareAndSwap(restored, 1)).toBe(true);
     expect((await repository.get(2)).adjustments[0].status).toBe('applied');
   });
+  it('round-trips cancelled adjustment compensation metadata without rewriting the original receipt', async () => {
+    const row = wallet();
+    row.revision = 2;
+    row.storageRevision = 2;
+    row.adjustments = [
+      {
+        adjustmentId: 'abort-id',
+        requestId: 'abort-request',
+        adminUserId: 1,
+        userId: 2,
+        clientId: 'client',
+        delta: 10000,
+        balanceBefore: 500,
+        balanceAfter: 10500,
+        walletRevision: 1,
+        status: 'cancelled',
+        cancelledWalletRevision: 2,
+        cancelledBalance: 500,
+        requestHash: 'original-hash',
+      },
+    ];
+    await repository.insert(row);
+    expect(await repository.get(2)).toEqual(row);
+    expect((await repository.forAdmin(1))[0].adjustments[0]).toMatchObject({
+      walletRevision: 1,
+      cancelledWalletRevision: 2,
+      status: 'cancelled',
+      requestHash: 'original-hash',
+    });
+  });
   it('preserves pending/applied TM receipts, learned move and zero stock through Mongoose replacement', async () => {
     await repository.insert(wallet());
     const row = wallet();

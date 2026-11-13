@@ -222,7 +222,8 @@ export class ShopGateway
       | 'useCancel'
       | 'priceSet'
       | 'balanceAdjust'
-      | 'balanceApplied',
+      | 'balanceApplied'
+      | 'balanceAbort',
     payload: any,
   ) {
     try {
@@ -274,6 +275,12 @@ export class ShopGateway
     @MessageBody() payload: any,
   ) {
     return this.run(socket, 'balanceApplied', payload);
+  }
+  @SubscribeMessage('shop:balance-abort') balanceAbort(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'balanceAbort', payload);
   }
   @SubscribeMessage('shop:applied') applied(
     @ConnectedSocket() socket: Socket,

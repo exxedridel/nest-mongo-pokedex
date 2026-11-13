@@ -27,7 +27,9 @@ export type BalanceAdjustment = {
   balanceBefore: number;
   balanceAfter: number;
   walletRevision: number;
-  status: 'pending' | 'applied';
+  status: 'pending' | 'applied' | 'cancelled';
+  cancelledWalletRevision?: number;
+  cancelledBalance?: number;
 };
 export type StoredBalanceAdjustment = BalanceAdjustment & {
   requestHash: string;
@@ -105,7 +107,11 @@ export type WalletRecord = Wallet & {
     moveId?: number;
   }[];
 };
-export type ShopActor = Actor & { ready: boolean; localBattle: boolean };
+export type ShopActor = Actor & {
+  ready: boolean;
+  localBattle: boolean;
+  supportsBalanceAdjustments: boolean;
+};
 export type ShopPlayer = {
   user: UserPublic;
   clientId: string;
@@ -117,6 +123,7 @@ export type ShopPlayer = {
   pendingReset?: boolean;
   pendingUse?: boolean;
   pendingAdjustment?: boolean;
+  supportsBalanceAdjustments?: boolean;
 };
 export type ShopState = {
   catalog?: ShopCatalog;
