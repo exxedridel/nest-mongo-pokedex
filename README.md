@@ -5,6 +5,26 @@ comunica las instancias React por Socket.IO. `/mensajes-prueba` permite elegir
 cualquier otro usuario registrado y conversar en privado. No hay una lista fija
 de dos correos. Las batallas y la Tienda usan los namespaces descritos abajo.
 
+## Poké Center: namespace `/shop`
+
+React2.7.0 agrega atención gratuita de uno o dos Pokémon por operación,
+seleccionados por el administrador. La Party y el efecto permanecen en el
+navegador jugador; Nest reenvía un resumen temporal del equipo y persiste sólo
+el recibo/estado de guardado. `shop:center-preview`, `shop:center-heal`,
+`shop:center-applied` y `shop:center-cancel` reutilizan presencia, identidad
+y cola de exclusión. El PREPARE exige soporte explícito del frontend, huella
+del equipo actual y plan de recuperación guardado antes de confirmar.
+
+Los campos opcionales `centerHeals` y `centerRevision` en `shop_wallets` no
+cambian dinero, inventario ni revisión económica. Un pendiente bloquea compras,
+objetos, ajustes, reinicio y reservas PvP/Trainer, también después de reiniciar
+Nest. `shop:sync {centerRequestId?}` recupera el recibo exacto. Cancelar cierra el
+pendiente sin deshacer una curación ya guardada; un terminal no se vuelve a
+ejecutar. Ver [POKE_CENTER_PROTOCOL.md](../POKE_CENTER_PROTOCOL.md).
+
+Desplegar Nest antes de React y recargar ambos frontends. Sin variables nuevas,
+MySQL, seed ni borrados de partidas/carteras/reservas. Una sola réplica Nest.
+
 ## Pokedollars y Poké Mart: namespace `/shop`
 
 Desde React2.6.0, `/back-office` administra los precios globales y los ajustes

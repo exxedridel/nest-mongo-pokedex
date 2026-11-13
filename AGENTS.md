@@ -9,6 +9,18 @@ Acuerdo del usuario confirmado el 2026-11-08:
 
 Si esta disponible, leer [la memoria compartida](../PROJECT_MEMORY.md). Este resumen se conserva tambien aqui para sesiones que abran solo este repositorio.
 
+Etapa vigente2026-11-12 React2.7.0: Poké Center /shop center-preview/heal/applied/
+cancel. ADMIN1–2gratis sinespera; preview de browser original no se persiste.
+cap supportsCenterHealing yACKoperation center-heal requeridos; revalidarroles/
+socket/batalla despuésPREPARE. centerHeals/centerRevision opcionalwallet sólo
+storageRevision, no money/items/walletrev. PendingActivity excluyetodosflujos
+inclusoreinicio. Terminal APPLIED/CANCELLEDfinal, cancelno reviertecuración.
+PREPAREhuérfanoplayer original tombstoneexacto; cancelarhistórico admite seq<=
+actual+1 sin bajarsecuencia pero rechaza si OTROrequestmismaseq siguepending,
+para no ocultarlo con watermark. No borrarreservas/Party/wallet. Nest115Shop/
+47PvP/build correctos, revisiónfrontendfinal y ChromeCenter+Shopcompleto pasan.
+Nest→React/recargarambos2.7.0 sinvars/MySQL/seed/reset. Vermemoria/protocolo.
+
 Correcciónvigente2026-11-12 React2.6.1: shop:balance-abort compensa sólo pending
 exacto bajoqueue/CAS, registra cancelled +cancelledWalletRevision/Balance sin
 alterarreceipt original. Adminorigen o cuentaJugadorotro navegadorpermitidos.

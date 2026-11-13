@@ -10,6 +10,9 @@ import { MemoryShopCatalogRepository } from './shop-catalog.repository';
 import {
   clone,
   BalanceAdjustment,
+  CenterHeal,
+  CenterPreview,
+  centerView,
   CONSUMABLE_ITEM_IDS,
   ConsumableItemId,
   fail,
@@ -66,6 +69,29 @@ export class ShopService implements OnModuleInit {
     operation?: 'balance-adjustment';
     error?: { message?: string };
   }>;
+  private centerSnapshotHandler?: (
+    actor: ShopActor,
+    request: { playerUserId: number; clientId: string },
+  ) => Promise<{ ok: boolean; preview?: CenterPreview }>;
+  private centerPrepareHandler?: (
+    actor: ShopActor,
+    request: {
+      requestId: string;
+      playerUserId: number;
+      clientId: string;
+      adminUserId: number;
+      partyHash: string;
+      partyRevision: number;
+      captureIds: string[];
+      centerRevision: number;
+    },
+  ) => Promise<{
+    ok: boolean;
+    operation?: 'center-heal';
+    planHash?: string;
+    partyHash?: string;
+    partyRevision?: number;
+  }>;
   constructor(
     @Inject(SHOP_REPOSITORY) readonly repository: ShopRepository,
     private readonly auth: AuthIdentityService,
@@ -90,7 +116,8 @@ export class ShopService implements OnModuleInit {
             row?.uses?.some((use) => use.status === 'pending') ||
             row?.adjustments?.some(
               (adjustment) => adjustment.status === 'pending',
-            ),
+            ) ||
+            row?.centerHeals?.some((receipt) => receipt.status === 'pending'),
         )
         .map((row) => row.userId);
     });
@@ -171,6 +198,7 @@ export class ShopService implements OnModuleInit {
       ready: previous?.ready ?? false,
       localBattle: previous?.localBattle ?? false,
       supportsBalanceAdjustments: previous?.supportsBalanceAdjustments ?? false,
+      supportsCenterHealing: previous?.supportsCenterHealing ?? false,
     });
   }
   disconnect(socketId: string) {
@@ -178,6 +206,12 @@ export class ShopService implements OnModuleInit {
   }
   setPrepareHandler(handler: typeof this.prepareHandler) {
     this.prepareHandler = handler;
+  }
+  setCenterSnapshotHandler(handler: typeof this.centerSnapshotHandler) {
+    this.centerSnapshotHandler = handler;
+  }
+  setCenterPrepareHandler(handler: typeof this.centerPrepareHandler) {
+    this.centerPrepareHandler = handler;
   }
   private current(userId: number): ShopActor | undefined {
     return [...this.actors.values()]
@@ -217,12 +251,19 @@ export class ShopService implements OnModuleInit {
     return row;
   }
   async presence(actor: Actor, payload: any): Promise<ShopState> {
-    object(payload, ['ready', 'localBattle', 'supportsBalanceAdjustments']);
+    object(payload, [
+      'ready',
+      'localBattle',
+      'supportsBalanceAdjustments',
+      'supportsCenterHealing',
+    ]);
     if (
       typeof payload.ready !== 'boolean' ||
       typeof payload.localBattle !== 'boolean' ||
       (payload.supportsBalanceAdjustments !== undefined &&
-        typeof payload.supportsBalanceAdjustments !== 'boolean')
+        typeof payload.supportsBalanceAdjustments !== 'boolean') ||
+      (payload.supportsCenterHealing !== undefined &&
+        typeof payload.supportsCenterHealing !== 'boolean')
     )
       fail('INVALID_INPUT', 'Estado de conexión de tienda no válido.');
     this.self(actor);
@@ -238,6 +279,7 @@ export class ShopService implements OnModuleInit {
       current.localBattle = payload.localBattle;
       current.supportsBalanceAdjustments =
         payload.supportsBalanceAdjustments === true;
+      current.supportsCenterHealing = payload.supportsCenterHealing === true;
       await this.ensureWallet(actor.user.id);
       this.activity.changed();
       return this.state(actor, {});
@@ -249,15 +291,36 @@ export class ShopService implements OnModuleInit {
     );
   }
   private async state(actor: Actor, payload: any = {}): Promise<ShopState> {
-    object(payload, ['adjustmentRequestId']);
+    object(payload, ['adjustmentRequestId', 'centerRequestId']);
     if (payload.adjustmentRequestId !== undefined)
       id(payload.adjustmentRequestId);
+    if (payload.centerRequestId !== undefined) id(payload.centerRequestId);
     this.self(actor);
     const catalog = await this.catalog.snapshot();
     if (actor.user.role === 'player') {
       const row = await this.ensureWallet(actor.user.id);
       return {
         catalog,
+        ...(payload.centerRequestId &&
+        row.centerHeals?.some(
+          (entry) => entry.requestId === payload.centerRequestId,
+        )
+          ? {
+              centerHeal: centerView(
+                row.centerHeals.find(
+                  (entry) => entry.requestId === payload.centerRequestId,
+                ),
+              ),
+            }
+          : {}),
+        centerHeals: [
+          ...(row.centerHeals ?? []).filter(
+            (entry) => entry.status === 'pending',
+          ),
+          ...(row.centerHeals ?? [])
+            .filter((entry) => entry.status !== 'pending')
+            .slice(-50),
+        ].map(centerView),
         ...(payload.adjustmentRequestId &&
         row.adjustments?.some(
           (entry) => entry.requestId === payload.adjustmentRequestId,
@@ -352,6 +415,9 @@ export class ShopService implements OnModuleInit {
       const pendingAdjustment = !!wallet?.adjustments?.some(
         (adjustment) => adjustment.status === 'pending',
       );
+      const pendingCenter = !!wallet?.centerHeals?.some(
+        (receipt) => receipt.status === 'pending',
+      );
       players.push({
         user: clone(valid.user),
         clientId: candidate.clientId,
@@ -359,11 +425,18 @@ export class ShopService implements OnModuleInit {
         ready: current.ready,
         inBattle: current.localBattle || busy.has(candidate.user.id),
         wallet: wallet ? walletView(wallet) : null,
-        pending: pending || pendingReset || pendingUse || pendingAdjustment,
+        pending:
+          pending ||
+          pendingReset ||
+          pendingUse ||
+          pendingAdjustment ||
+          pendingCenter,
         pendingReset,
         pendingUse,
         pendingAdjustment,
         supportsBalanceAdjustments: current.supportsBalanceAdjustments,
+        pendingCenter,
+        supportsCenterHealing: current.supportsCenterHealing,
       });
     }
     const rows = await this.repository.forAdmin(actor.user.id);
@@ -371,9 +444,24 @@ export class ShopService implements OnModuleInit {
       .flatMap((row) => row.adjustments ?? [])
       .filter((adjustment) => adjustment.adminUserId === actor.user.id)
       .sort((left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0));
+    const centerHeals = rows
+      .flatMap((row) => row.centerHeals ?? [])
+      .filter((entry) => entry.adminUserId === actor.user.id);
+    const recentCenterHeals = new Set(
+      centerHeals.filter((entry) => entry.status !== 'pending').slice(-50),
+    );
+    const exactCenterHeal = payload.centerRequestId
+      ? centerHeals.find((entry) => entry.requestId === payload.centerRequestId)
+      : undefined;
     return {
       catalog,
       players,
+      centerHeals: centerHeals
+        .filter(
+          (entry) => entry.status === 'pending' || recentCenterHeals.has(entry),
+        )
+        .map(centerView),
+      ...(exactCenterHeal ? { centerHeal: centerView(exactCenterHeal) } : {}),
       purchases: rows
         .flatMap((row) => row.purchases)
         .filter((purchase) => purchase.adminUserId === actor.user.id)
@@ -387,6 +475,553 @@ export class ShopService implements OnModuleInit {
           .slice(-50),
       ].map(({ requestHash: _, createdAt: __, ...adjustment }) => adjustment),
     };
+  }
+  private centerSelection(payload: any) {
+    id(payload.requestId);
+    id(payload.clientId);
+    integer(payload.playerUserId, 1);
+    integer(payload.partyRevision);
+    if (
+      typeof payload.partyHash !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(payload.partyHash)
+    )
+      fail('INVALID_INPUT', 'La huella del equipo no es válida.');
+    if (
+      !Array.isArray(payload.captureIds) ||
+      payload.captureIds.length < 1 ||
+      payload.captureIds.length > 2 ||
+      new Set(payload.captureIds).size !== payload.captureIds.length
+    )
+      fail(
+        'INVALID_INPUT',
+        'Elige uno o dos Pokémon distintos para recuperar.',
+      );
+    payload.captureIds.forEach(id);
+  }
+  private centerFingerprint(adminUserId: number, payload: any) {
+    return digest([
+      adminUserId,
+      payload.playerUserId,
+      payload.clientId,
+      payload.partyHash,
+      payload.partyRevision,
+      payload.captureIds,
+    ]);
+  }
+  private centerOwner(
+    userId: number,
+    clientId: string,
+    ready = true,
+  ): ShopActor {
+    const owner = this.current(userId);
+    if (!owner || owner.clientId !== clientId || owner.user.role !== 'player')
+      fail(
+        'PLAYER_OFFLINE',
+        'Reconecta el navegador original del jugador al Poké Center.',
+      );
+    if (!owner.supportsCenterHealing)
+      fail(
+        'PLAYER_UPDATE_REQUIRED',
+        'Actualiza y recarga el frontend del jugador para usar Poké Center.',
+      );
+    if (owner.localBattle)
+      fail(
+        'PLAYER_IN_BATTLE',
+        'El jugador está en batalla. Termínala antes de usar Poké Center.',
+      );
+    if (ready && !owner.ready)
+      fail(
+        'PLAYER_NOT_READY',
+        'El jugador debe sincronizar su partida antes de usar Poké Center.',
+      );
+    return owner;
+  }
+  private async centerIdentity(actor: Actor, owner: ShopActor) {
+    this.admin(actor);
+    const adminIdentity = await this.auth.authenticate(actor.token);
+    if (
+      adminIdentity.user.id !== actor.user.id ||
+      adminIdentity.user.role !== 'admin'
+    )
+      fail(
+        'ADMIN_REQUIRED',
+        'La cuenta ya no tiene permisos de administrador.',
+      );
+    const contacts = await this.auth.contacts(actor.token, actor.user.id);
+    if (
+      !contacts.some(
+        (user) => user.id === owner.user.id && user.role === 'player',
+      )
+    )
+      fail('INVALID_PLAYER', 'El jugador seleccionado ya no está disponible.');
+    const identity = await this.auth.authenticate(owner.token);
+    if (identity.user.id !== owner.user.id || identity.user.role !== 'player')
+      fail(
+        'INVALID_PLAYER',
+        'La sesión ya no corresponde a un jugador vigente.',
+      );
+    this.admin(actor);
+  }
+  private validCenterPreview(
+    value: any,
+    userId: number,
+    clientId: string,
+  ): value is CenterPreview {
+    if (
+      !value ||
+      value.userId !== userId ||
+      value.clientId !== clientId ||
+      !Number.isSafeInteger(value.partyRevision) ||
+      value.partyRevision < 0 ||
+      typeof value.partyHash !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(value.partyHash) ||
+      !Array.isArray(value.pokemons) ||
+      value.pokemons.length < 1 ||
+      value.pokemons.length > 6
+    )
+      return false;
+    const captures = new Set<string>();
+    return value.pokemons.every((pokemon: any) => {
+      if (
+        !pokemon ||
+        typeof pokemon.captureId !== 'string' ||
+        !/^[\w.:-]{1,128}$/.test(pokemon.captureId) ||
+        captures.has(pokemon.captureId)
+      )
+        return false;
+      captures.add(pokemon.captureId);
+      return (
+        Number.isSafeInteger(pokemon.pokemonId) &&
+        pokemon.pokemonId > 0 &&
+        pokemon.pokemonId <= 386 &&
+        typeof pokemon.name === 'string' &&
+        pokemon.name.length > 0 &&
+        pokemon.name.length <= 100 &&
+        (pokemon.image === null ||
+          (typeof pokemon.image === 'string' &&
+            pokemon.image.length <= 2048)) &&
+        Number.isSafeInteger(pokemon.level) &&
+        pokemon.level >= 1 &&
+        pokemon.level <= 100 &&
+        Number.isSafeInteger(pokemon.maxHp) &&
+        pokemon.maxHp > 0 &&
+        pokemon.maxHp <= 1000000 &&
+        Number.isSafeInteger(pokemon.currentHp) &&
+        pokemon.currentHp >= 0 &&
+        pokemon.currentHp <= pokemon.maxHp &&
+        typeof pokemon.needsHealing === 'boolean' &&
+        Array.isArray(pokemon.statuses) &&
+        pokemon.statuses.length <= 32 &&
+        pokemon.statuses.every(
+          (status: any) => typeof status === 'string' && status.length <= 64,
+        ) &&
+        Array.isArray(pokemon.moves) &&
+        pokemon.moves.length <= 4 &&
+        new Set(pokemon.moves.map((move: any) => move?.id)).size ===
+          pokemon.moves.length &&
+        pokemon.moves.every(
+          (move: any) =>
+            move &&
+            Number.isSafeInteger(move.id) &&
+            move.id >= 1 &&
+            move.id <= 354 &&
+            typeof move.name === 'string' &&
+            move.name.length > 0 &&
+            move.name.length <= 128 &&
+            Number.isSafeInteger(move.maxPp) &&
+            move.maxPp >= 0 &&
+            move.maxPp <= 100 &&
+            Number.isSafeInteger(move.currentPp) &&
+            move.currentPp >= 0 &&
+            move.currentPp <= move.maxPp,
+        )
+      );
+    });
+  }
+  async centerPreview(actor: Actor, payload: any): Promise<ShopState> {
+    this.admin(actor);
+    object(payload, ['playerUserId', 'clientId']);
+    integer(payload.playerUserId, 1);
+    id(payload.clientId);
+    const preview = await this.activity.runExclusive(
+      [payload.playerUserId],
+      async () => {
+        this.admin(actor);
+        await this.activity.assertAvailable([payload.playerUserId]);
+        const owner = this.centerOwner(payload.playerUserId, payload.clientId);
+        await this.centerIdentity(actor, owner);
+        if (!this.centerSnapshotHandler)
+          fail(
+            'CENTER_UNAVAILABLE',
+            'No se pudo solicitar el equipo del jugador.',
+          );
+        const response = await this.centerSnapshotHandler(
+          owner,
+          clone(payload),
+        );
+        const latest = this.centerOwner(payload.playerUserId, payload.clientId);
+        if (
+          latest.socketId !== owner.socketId ||
+          !response?.ok ||
+          !this.validCenterPreview(
+            response.preview,
+            payload.playerUserId,
+            payload.clientId,
+          )
+        )
+          fail(
+            'PLAYER_NOT_READY',
+            'No se pudo leer el equipo actual. Actualiza y vuelve a seleccionar al jugador.',
+          );
+        await this.centerIdentity(actor, latest);
+        if (
+          this.centerOwner(payload.playerUserId, payload.clientId).socketId !==
+          owner.socketId
+        )
+          fail(
+            'SESSION_CHANGED',
+            'La conexión del jugador cambió al leer su equipo.',
+          );
+        // Only the validated display summary is returned. No general Party is stored.
+        return clone({
+          userId: response.preview.userId,
+          clientId: response.preview.clientId,
+          partyRevision: response.preview.partyRevision,
+          partyHash: response.preview.partyHash,
+          pokemons: response.preview.pokemons.map((pokemon) => ({
+            captureId: pokemon.captureId,
+            pokemonId: pokemon.pokemonId,
+            name: pokemon.name,
+            image: pokemon.image,
+            level: pokemon.level,
+            currentHp: pokemon.currentHp,
+            maxHp: pokemon.maxHp,
+            statuses: pokemon.statuses,
+            needsHealing: pokemon.needsHealing,
+            moves: pokemon.moves.map(({ id, name, currentPp, maxPp }) => ({
+              id,
+              name,
+              currentPp,
+              maxPp,
+            })),
+          })),
+        });
+      },
+    );
+    return { centerPreview: preview };
+  }
+  async centerHeal(actor: Actor, payload: any): Promise<ShopState> {
+    this.admin(actor);
+    object(payload, [
+      'requestId',
+      'playerUserId',
+      'clientId',
+      'partyHash',
+      'partyRevision',
+      'captureIds',
+    ]);
+    this.centerSelection(payload);
+    const fingerprint = this.centerFingerprint(actor.user.id, payload);
+    const receipt = await this.activity.runExclusive(
+      [payload.playerUserId],
+      async () => {
+        this.admin(actor);
+        const prior = (await this.repository.forAdmin(actor.user.id))
+          .flatMap((row) => row.centerHeals ?? [])
+          .find(
+            (entry) =>
+              entry.adminUserId === actor.user.id &&
+              entry.requestId === payload.requestId,
+          );
+        if (prior) {
+          if (prior.requestHash !== fingerprint)
+            fail(
+              'REQUEST_CONFLICT',
+              'Esta solicitud ya corresponde a otra recuperación.',
+            );
+          return centerView(prior);
+        }
+        const row = await this.repository.get(payload.playerUserId);
+        if (!row)
+          fail(
+            'PLAYER_NOT_READY',
+            'Sincroniza la partida del jugador antes de recuperar su equipo.',
+          );
+        if (
+          row.centerHeals?.some(
+            (entry) => entry.requestId === payload.requestId,
+          )
+        )
+          fail(
+            'REQUEST_CONFLICT',
+            'Esta solicitud ya pertenece a otra recuperación o administrador.',
+          );
+        if ((row.centerHeals?.length ?? 0) >= 4096)
+          fail(
+            'CENTER_HISTORY_FULL',
+            'El historial de recuperaciones requiere mantenimiento.',
+          );
+        await this.activity.assertAvailable([payload.playerUserId]);
+        const owner = this.centerOwner(payload.playerUserId, payload.clientId);
+        await this.centerIdentity(actor, owner);
+        const sequence = (row.centerRevision ?? 0) + 1;
+        if (!Number.isSafeInteger(sequence))
+          fail(
+            'CENTER_CONFLICT',
+            'La revisión del Poké Center está fuera de rango.',
+          );
+        if (!this.centerPrepareHandler)
+          fail(
+            'CENTER_UNAVAILABLE',
+            'No se pudo reservar la recuperación del equipo.',
+          );
+        const prepared = await this.centerPrepareHandler(owner, {
+          ...clone(payload),
+          adminUserId: actor.user.id,
+          centerRevision: sequence,
+        });
+        if (
+          !prepared?.ok ||
+          prepared.operation !== 'center-heal' ||
+          prepared.partyHash !== payload.partyHash ||
+          prepared.partyRevision !== payload.partyRevision ||
+          typeof prepared.planHash !== 'string' ||
+          !/^[a-f0-9]{64}$/.test(prepared.planHash)
+        )
+          fail(
+            'PLAYER_NOT_READY',
+            'El jugador no confirmó la recuperación de su equipo actual.',
+          );
+        const latest = this.centerOwner(
+          payload.playerUserId,
+          payload.clientId,
+          false,
+        );
+        if (latest.socketId !== owner.socketId)
+          fail(
+            'SESSION_CHANGED',
+            'La conexión cambió mientras se reservaba la recuperación.',
+          );
+        await this.centerIdentity(actor, latest);
+        if (
+          this.centerOwner(payload.playerUserId, payload.clientId, false)
+            .socketId !== owner.socketId
+        )
+          fail(
+            'SESSION_CHANGED',
+            'Reconecta el navegador que preparó la recuperación.',
+          );
+        await this.activity.assertAvailable([payload.playerUserId]);
+        const receipt: CenterHeal = {
+          requestId: payload.requestId,
+          adminUserId: actor.user.id,
+          userId: payload.playerUserId,
+          clientId: payload.clientId,
+          captureIds: [...payload.captureIds],
+          partyHash: payload.partyHash,
+          partyRevision: payload.partyRevision,
+          planHash: prepared.planHash,
+          centerRevision: sequence,
+          status: 'pending',
+        };
+        const previous = row.storageRevision;
+        row.centerRevision = sequence;
+        (row.centerHeals ??= []).push({ ...receipt, requestHash: fingerprint });
+        row.storageRevision++;
+        if (!(await this.repository.compareAndSwap(row, previous)))
+          fail(
+            'CENTER_CONFLICT',
+            'La partida cambió mientras se guardaba la recuperación. Sincroniza para recuperarla.',
+          );
+        this.activity.changed();
+        return receipt;
+      },
+    );
+    return { ...(await this.sync(actor, {})), centerHeal: receipt };
+  }
+  async centerApplied(actor: Actor, payload: any): Promise<ShopState> {
+    object(payload, ['requestId', 'centerRevision', 'planHash']);
+    id(payload.requestId);
+    integer(payload.centerRevision, 1);
+    if (
+      typeof payload.planHash !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(payload.planHash)
+    )
+      fail('INVALID_INPUT', 'La huella de recuperación no es válida.');
+    this.self(actor);
+    if (actor.user.role !== 'player')
+      fail(
+        'PLAYER_REQUIRED',
+        'Sólo el jugador puede confirmar el guardado de su equipo.',
+      );
+    const receipt = await this.activity.runExclusive(
+      [actor.user.id],
+      async () => {
+        for (let attempt = 0; attempt < 20; attempt++) {
+          this.self(actor);
+          const row = await this.repository.get(actor.user.id);
+          const heal = row?.centerHeals?.find(
+            (entry) => entry.requestId === payload.requestId,
+          );
+          if (!heal || heal.clientId !== actor.clientId)
+            fail(
+              'OWNER_REQUIRED',
+              'Confirma la recuperación desde su navegador original.',
+            );
+          if (
+            heal.centerRevision !== payload.centerRevision ||
+            heal.planHash !== payload.planHash
+          )
+            fail(
+              'CENTER_CONFLICT',
+              'El recibo no coincide con la recuperación guardada.',
+            );
+          if (heal.status !== 'pending') return centerView(heal);
+          if (this.current(actor.user.id)?.socketId !== actor.socketId)
+            fail(
+              'OWNER_REQUIRED',
+              'Reconecta el navegador que preparó esta recuperación.',
+            );
+          const previous = row.storageRevision;
+          heal.status = 'applied';
+          row.storageRevision++;
+          if (!(await this.repository.compareAndSwap(row, previous))) continue;
+          this.activity.changed();
+          return centerView(heal);
+        }
+        fail('CENTER_CONFLICT', 'No se pudo confirmar el guardado del equipo.');
+      },
+    );
+    return { ...(await this.sync(actor, {})), centerHeal: receipt };
+  }
+  async centerCancel(actor: Actor, payload: any): Promise<ShopState> {
+    object(payload, [
+      'requestId',
+      'playerUserId',
+      'clientId',
+      'adminUserId',
+      'partyHash',
+      'partyRevision',
+      'captureIds',
+      'planHash',
+      'centerRevision',
+    ]);
+    id(payload.requestId);
+    id(payload.clientId);
+    integer(payload.playerUserId, 1);
+    this.self(actor);
+    const receipt = await this.activity.runExclusive(
+      [payload.playerUserId],
+      async () => {
+        for (let attempt = 0; attempt < 20; attempt++) {
+          this.self(actor);
+          const row = await this.repository.get(payload.playerUserId);
+          if (!row)
+            fail(
+              'PLAYER_NOT_READY',
+              'Sincroniza la partida antes de cancelar la recuperación.',
+            );
+          const heal = row.centerHeals?.find(
+            (entry) => entry.requestId === payload.requestId,
+          );
+          if (heal) {
+            if (
+              heal.clientId !== payload.clientId ||
+              (actor.user.id !== heal.userId &&
+                (actor.user.role !== 'admin' ||
+                  actor.user.id !== heal.adminUserId))
+            )
+              fail(
+                'OWNER_REQUIRED',
+                'Sólo el jugador o el administrador que inició esta recuperación pueden cancelarla.',
+              );
+            if (heal.status !== 'pending') return centerView(heal);
+            const previous = row.storageRevision;
+            heal.status = 'cancelled';
+            row.storageRevision++;
+            if (!(await this.repository.compareAndSwap(row, previous)))
+              continue;
+            this.activity.changed();
+            return centerView(heal);
+          }
+          // A persisted PREPARE without a server receipt is closed with an exact
+          // tombstone. A late request can never execute it after the lock releases.
+          if (
+            actor.user.role !== 'player' ||
+            actor.user.id !== payload.playerUserId ||
+            actor.clientId !== payload.clientId ||
+            this.current(actor.user.id)?.socketId !== actor.socketId
+          )
+            fail(
+              'CENTER_NOT_FOUND',
+              'La recuperación no se ha confirmado. Reconecta el navegador del jugador para cerrar su reserva.',
+            );
+          this.centerSelection(payload);
+          integer(payload.adminUserId, 1);
+          integer(payload.centerRevision, 1);
+          if (
+            typeof payload.planHash !== 'string' ||
+            !/^[a-f0-9]{64}$/.test(payload.planHash)
+          )
+            fail('INVALID_INPUT', 'La huella de recuperación no es válida.');
+          if (payload.centerRevision > (row.centerRevision ?? 0) + 1)
+            fail(
+              'CENTER_CONFLICT',
+              'La revisión cambió; sincroniza la recuperación original.',
+            );
+          if (
+            row.centerHeals?.some(
+              (entry) =>
+                entry.requestId !== payload.requestId &&
+                entry.centerRevision === payload.centerRevision &&
+                entry.status === 'pending',
+            )
+          )
+            fail(
+              'CENTER_CONFLICT',
+              'Completa o cancela la otra recuperación pendiente antes de cerrar esta reserva antigua.',
+            );
+          if ((row.centerHeals?.length ?? 0) >= 4096)
+            fail(
+              'CENTER_HISTORY_FULL',
+              'El historial de recuperaciones requiere mantenimiento.',
+            );
+          const cancelled: CenterHeal = {
+            requestId: payload.requestId,
+            adminUserId: payload.adminUserId,
+            userId: payload.playerUserId,
+            clientId: payload.clientId,
+            captureIds: [...payload.captureIds],
+            partyHash: payload.partyHash,
+            partyRevision: payload.partyRevision,
+            planHash: payload.planHash,
+            centerRevision: payload.centerRevision,
+            status: 'cancelled',
+          };
+          const previous = row.storageRevision;
+          // A failed PREPARE may return after another browser completed a newer
+          // request. Its exact historical tombstone still closes the old lock;
+          // it never rewinds the monotonic sequence or grants another healing.
+          row.centerRevision = Math.max(
+            row.centerRevision ?? 0,
+            payload.centerRevision,
+          );
+          (row.centerHeals ??= []).push({
+            ...cancelled,
+            requestHash: this.centerFingerprint(payload.adminUserId, payload),
+          });
+          row.storageRevision++;
+          if (!(await this.repository.compareAndSwap(row, previous))) continue;
+          this.activity.changed();
+          return cancelled;
+        }
+        fail(
+          'CENTER_CONFLICT',
+          'No se pudo cancelar la recuperación. Reintenta con la misma solicitud.',
+        );
+      },
+    );
+    return { ...(await this.sync(actor, {})), centerHeal: receipt };
   }
   async purchase(actor: Actor, payload: any): Promise<ShopState> {
     this.admin(actor);

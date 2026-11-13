@@ -1664,6 +1664,118 @@ describe('Shop Socket.IO authenticated namespace', () => {
     expect(selected.pendingAdjustment).toBe(false);
     expect(selected.supportsBalanceAdjustments).toBe(true);
   });
+  it('forwards private Center snapshots and prepared plans, publishes durable status and authenticates ACK/cancel', async () => {
+    const admin = await connect(1),
+      player = await connect(2),
+      other = await connect(3);
+    const partyHash = 'a'.repeat(64),
+      planHash = 'b'.repeat(64);
+    await emit(player, 'shop:presence', { ready: true, localBattle: false });
+    expect(
+      (
+        await emit(admin, 'shop:center-preview', {
+          playerUserId: 2,
+          clientId: 'shop-client-2',
+        })
+      ).error.code,
+    ).toBe('PLAYER_UPDATE_REQUIRED');
+    const preview = {
+      userId: 2,
+      clientId: 'shop-client-2',
+      partyRevision: 5,
+      partyHash,
+      pokemons: [
+        {
+          captureId: 'center-capture',
+          pokemonId: 1,
+          name: 'Bulbasaur',
+          image: null,
+          level: 5,
+          currentHp: 0,
+          maxHp: 25,
+          statuses: ['poisoned'],
+          needsHealing: true,
+          moves: [{ id: 33, name: 'Tackle', currentPp: 0, maxPp: 35 }],
+        },
+      ],
+    };
+    player.on('shop:center-snapshot', (_request, ack) =>
+      ack({ ok: true, preview }),
+    );
+    player.on('shop:center-prepare', (request, ack) =>
+      ack({
+        ok: true,
+        operation: 'center-heal',
+        partyRevision: request.partyRevision,
+        partyHash: request.partyHash,
+        planHash,
+      }),
+    );
+    await emit(player, 'shop:presence', {
+      ready: true,
+      localBattle: false,
+      supportsCenterHealing: true,
+    });
+    expect(
+      (
+        await emit(admin, 'shop:center-preview', {
+          playerUserId: 2,
+          clientId: 'shop-client-2',
+        })
+      ).centerPreview,
+    ).toEqual(preview);
+    const request = {
+      requestId: 'socket-center',
+      playerUserId: 2,
+      clientId: 'shop-client-2',
+      partyHash,
+      partyRevision: 5,
+      captureIds: ['center-capture'],
+    };
+    const created = await emit(admin, 'shop:center-heal', request);
+    expect(created.ok).toBe(true);
+    expect(created.centerHeal).toMatchObject({
+      status: 'pending',
+      centerRevision: 1,
+    });
+    const own = await emit(player, 'shop:sync', {
+      centerRequestId: request.requestId,
+    });
+    expect(own.wallet.balance).toBe(500);
+    expect(own.wallet.revision).toBe(0);
+    expect(own.centerHeal.status).toBe('pending');
+    expect((await emit(other, 'shop:sync', {})).centerHeals).toEqual([]);
+    expect(
+      (
+        await emit(other, 'shop:center-cancel', {
+          requestId: request.requestId,
+          playerUserId: 2,
+          clientId: 'shop-client-2',
+        })
+      ).error.code,
+    ).toBe('OWNER_REQUIRED');
+    const applied = await emit(player, 'shop:center-applied', {
+      requestId: request.requestId,
+      centerRevision: 1,
+      planHash,
+    });
+    expect(applied.ok).toBe(true);
+    expect(applied.centerHeal.status).toBe('applied');
+    expect(
+      (
+        await emit(admin, 'shop:center-cancel', {
+          requestId: request.requestId,
+          playerUserId: 2,
+          clientId: 'shop-client-2',
+        })
+      ).centerHeal.status,
+    ).toBe('applied');
+    expect(
+      (await emit(admin, 'shop:sync', {})).players.find(
+        (entry) => entry.user.id === 2,
+      ).pendingCenter,
+    ).toBe(false);
+  });
   it('authenticates, broadcasts wallets privately and performs owner preflight before a persisted purchase', async () => {
     const admin = await connect(1),
       player = await connect(2),

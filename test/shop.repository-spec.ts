@@ -85,6 +85,52 @@ describe('Mongo wallet atomic replacement (real Mongoose, fake driver)', () => {
     expect(await repository.compareAndSwap(restored, 1)).toBe(true);
     expect((await repository.get(2)).adjustments[0].status).toBe('applied');
   });
+  it('persists Center pending/applied/cancelled metadata without changing wallet revision, stock or cash', async () => {
+    const row = wallet();
+    row.centerRevision = 1;
+    row.centerHeals = [
+      {
+        requestId: 'center-first',
+        adminUserId: 1,
+        userId: 2,
+        clientId: 'center-browser',
+        captureIds: ['one', 'two'],
+        partyHash: 'a'.repeat(64),
+        partyRevision: 12,
+        planHash: 'b'.repeat(64),
+        centerRevision: 1,
+        status: 'pending',
+        requestHash: 'immutable-request',
+      },
+    ];
+    row.storageRevision = 1;
+    await repository.insert(row);
+    expect(await repository.get(2)).toEqual(row);
+    expect((await repository.forAdmin(1))[0].centerHeals).toEqual(
+      row.centerHeals,
+    );
+    const pending = await repository.get(2);
+    pending.centerHeals[0].status = 'applied';
+    pending.storageRevision++;
+    expect(await repository.compareAndSwap(pending, 1)).toBe(true);
+    pending.centerRevision = 2;
+    pending.centerHeals.push({
+      ...pending.centerHeals[0],
+      requestId: 'center-second',
+      centerRevision: 2,
+      status: 'cancelled',
+    });
+    pending.storageRevision++;
+    expect(await repository.compareAndSwap(pending, 2)).toBe(true);
+    const stored = await repository.get(2);
+    expect(stored.centerHeals.map((receipt) => receipt.status)).toEqual([
+      'applied',
+      'cancelled',
+    ]);
+    expect(stored.balance).toBe(500);
+    expect(stored.items).toEqual({});
+    expect(stored.revision).toBe(0);
+  });
   it('round-trips cancelled adjustment compensation metadata without rewriting the original receipt', async () => {
     const row = wallet();
     row.revision = 2;

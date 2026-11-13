@@ -9,11 +9,15 @@ module.exports.createMongooseShopFixture = function ({ mongoose, schema }) {
     Object.entries(filter).every(([key, value]) =>
       key === '$or'
         ? value.some((branch) => matches(row, branch))
-        : key === 'adjustments.adminUserId'
-          ? (row.adjustments ?? []).some((entry) => entry.adminUserId === value)
-          : key === 'purchases.adminUserId'
-            ? row.purchases.some((purchase) => purchase.adminUserId === value)
-            : row[key] === value,
+        : key === 'centerHeals.adminUserId'
+          ? (row.centerHeals ?? []).some((entry) => entry.adminUserId === value)
+          : key === 'adjustments.adminUserId'
+            ? (row.adjustments ?? []).some(
+                (entry) => entry.adminUserId === value,
+              )
+            : key === 'purchases.adminUserId'
+              ? row.purchases.some((purchase) => purchase.adminUserId === value)
+              : row[key] === value,
     );
   const project = (row, options) => {
     if (!row) return null;

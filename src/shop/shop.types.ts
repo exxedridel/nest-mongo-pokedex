@@ -35,6 +35,38 @@ export type StoredBalanceAdjustment = BalanceAdjustment & {
   requestHash: string;
   createdAt?: number;
 };
+export type CenterPokemon = {
+  captureId: string;
+  pokemonId: number;
+  name: string;
+  image: string | null;
+  level: number;
+  currentHp: number;
+  maxHp: number;
+  statuses: string[];
+  moves: { id: number; name: string; currentPp: number; maxPp: number }[];
+  needsHealing: boolean;
+};
+export type CenterPreview = {
+  userId: number;
+  clientId: string;
+  partyRevision: number;
+  partyHash: string;
+  pokemons: CenterPokemon[];
+};
+export type CenterHeal = {
+  requestId: string;
+  adminUserId: number;
+  userId: number;
+  clientId: string;
+  captureIds: string[];
+  partyHash: string;
+  partyRevision: number;
+  planHash: string;
+  centerRevision: number;
+  status: 'pending' | 'applied' | 'cancelled';
+};
+export type StoredCenterHeal = CenterHeal & { requestHash: string };
 export const CONSUMABLE_ITEM_IDS = [
   'full-restore',
   'max-ether',
@@ -99,6 +131,8 @@ export type WalletRecord = Wallet & {
   resets?: StoredGameReset[];
   uses?: StoredItemUse[];
   adjustments?: StoredBalanceAdjustment[];
+  centerRevision?: number;
+  centerHeals?: StoredCenterHeal[];
   battleUses?: {
     key: string;
     battleId: string;
@@ -111,6 +145,7 @@ export type ShopActor = Actor & {
   ready: boolean;
   localBattle: boolean;
   supportsBalanceAdjustments: boolean;
+  supportsCenterHealing: boolean;
 };
 export type ShopPlayer = {
   user: UserPublic;
@@ -124,6 +159,8 @@ export type ShopPlayer = {
   pendingUse?: boolean;
   pendingAdjustment?: boolean;
   supportsBalanceAdjustments?: boolean;
+  pendingCenter?: boolean;
+  supportsCenterHealing?: boolean;
 };
 export type ShopState = {
   catalog?: ShopCatalog;
@@ -136,6 +173,9 @@ export type ShopState = {
   reset?: GameReset;
   uses?: ItemUse[];
   use?: ItemUse;
+  centerPreview?: CenterPreview;
+  centerHeal?: CenterHeal;
+  centerHeals?: CenterHeal[];
 };
 export class ShopError extends Error {
   constructor(
@@ -169,4 +209,8 @@ export function resetView(record: StoredGameReset): GameReset {
 export function useView(record: StoredItemUse): ItemUse {
   const { requestHash: _, ...use } = record;
   return clone(use);
+}
+export function centerView(record: StoredCenterHeal): CenterHeal {
+  const { requestHash: _, ...receipt } = record;
+  return clone(receipt);
 }

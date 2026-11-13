@@ -86,6 +86,41 @@ export class ShopGateway
             );
         }),
     );
+    const centerRequest = (
+      actor: Actor,
+      event: string,
+      request: unknown,
+    ): Promise<any> =>
+      new Promise((resolve, reject) => {
+        const socket = this.namespace.sockets.get(actor.socketId);
+        if (!socket?.connected) {
+          reject(
+            new ShopError(
+              'PLAYER_OFFLINE',
+              'El jugador se desconectó de Poké Center.',
+            ),
+          );
+          return;
+        }
+        socket
+          .timeout(5000)
+          .emit(event, request, (error: Error | null, acknowledgement: any) => {
+            if (error)
+              reject(
+                new ShopError(
+                  'PLAYER_NOT_READY',
+                  'El jugador no confirmó la solicitud del Poké Center. Reconecta para recuperar la operación.',
+                ),
+              );
+            else resolve(acknowledgement);
+          });
+      });
+    this.service.setCenterSnapshotHandler((actor, request) =>
+      centerRequest(actor, 'shop:center-snapshot', request),
+    );
+    this.service.setCenterPrepareHandler((actor, request) =>
+      centerRequest(actor, 'shop:center-prepare', request),
+    );
     namespace.use((socket, next) => {
       void (async () => {
         const clientId = socket.handshake.auth?.clientId;
@@ -223,7 +258,11 @@ export class ShopGateway
       | 'priceSet'
       | 'balanceAdjust'
       | 'balanceApplied'
-      | 'balanceAbort',
+      | 'balanceAbort'
+      | 'centerPreview'
+      | 'centerHeal'
+      | 'centerApplied'
+      | 'centerCancel',
     payload: any,
   ) {
     try {
@@ -235,7 +274,11 @@ export class ShopGateway
       const response = this.handleError(socket, error);
       // A failed/aborted preflight must still release its player's local lock
       // through a fresh serialized state. No debit is rolled back on a timeout.
-      if (operation === 'purchase' || operation === 'balanceAdjust')
+      if (
+        operation === 'purchase' ||
+        operation === 'balanceAdjust' ||
+        operation === 'centerHeal'
+      )
         await this.publish();
       return response;
     }
@@ -245,6 +288,30 @@ export class ShopGateway
     @MessageBody() payload: any,
   ) {
     return this.run(socket, 'sync', payload);
+  }
+  @SubscribeMessage('shop:center-preview') centerPreview(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'centerPreview', payload);
+  }
+  @SubscribeMessage('shop:center-heal') centerHeal(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'centerHeal', payload);
+  }
+  @SubscribeMessage('shop:center-applied') centerApplied(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'centerApplied', payload);
+  }
+  @SubscribeMessage('shop:center-cancel') centerCancel(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'centerCancel', payload);
   }
   @SubscribeMessage('shop:presence') presence(
     @ConnectedSocket() socket: Socket,
@@ -327,6 +394,8 @@ export class ShopGateway
   onModuleDestroy() {
     this.unsubscribe?.();
     this.service.setPrepareHandler(undefined);
+    this.service.setCenterSnapshotHandler(undefined);
+    this.service.setCenterPrepareHandler(undefined);
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     this.service.actors.clear();
