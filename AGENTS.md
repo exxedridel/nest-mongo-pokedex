@@ -9,6 +9,14 @@ Acuerdo del usuario confirmado el 2026-11-08:
 
 Si esta disponible, leer [la memoria compartida](../PROJECT_MEMORY.md). Este resumen se conserva tambien aqui para sesiones que abran solo este repositorio.
 
+Etapa vigente2026-11-13 React2.8.0: BALL_ITEM_IDS Poké/Great/Ultra amplíaUSABLE,
+CONSUMABLE permanece3 (noadminballs). shop:use bolasexige local-battle/sinmoveId;
+debita1+reciboCAS, retryidempotente, postcommitcancelnorefund. Huellas antiguas,
+schema/eventos/varsintactos. Tiradafísica/manual/Party/motor/seed continúanReact.
+128Shop47PvP/buildpasan, diststable paraChrome; capturaChromeaislada yregresión
+Shopcompleta+Center aprobados. Ver memoria/POKEBALL_PROTOCOL. DeployNest→React yrecargar
+2.8.0 sinMySQL/env/seed/reset ni borrareservas/wallets.
+
 Etapa vigente2026-11-12 React2.7.0: Poké Center /shop center-preview/heal/applied/
 cancel. ADMIN1–2gratis sinespera; preview de browser original no se persiste.
 cap supportsCenterHealing yACKoperation center-heal requeridos; revalidarroles/

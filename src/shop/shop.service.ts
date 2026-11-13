@@ -9,6 +9,7 @@ import { ShopCatalogService } from './shop-catalog.service';
 import { MemoryShopCatalogRepository } from './shop-catalog.repository';
 import {
   clone,
+  BALL_ITEM_IDS,
   BalanceAdjustment,
   CenterHeal,
   CenterPreview,
@@ -1717,6 +1718,11 @@ export class ShopService implements OnModuleInit {
       fail('INVALID_INPUT', 'El plan de uso del objeto no es válido.');
     if (itemId === 'tm' && payload.context !== 'party')
       fail('PLAYER_IN_BATTLE', 'Las TM sólo se pueden usar fuera de combate.');
+    if (BALL_ITEM_IDS.includes(itemId) && payload.context !== 'local-battle')
+      fail(
+        'PLAYER_IN_BATTLE',
+        'Las pokebolas sólo se pueden lanzar en un encuentro salvaje local.',
+      );
     this.self(actor);
     if (actor.user.role !== 'player')
       fail(

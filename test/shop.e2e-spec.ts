@@ -15,7 +15,7 @@ import { ShopModule } from '../src/shop/shop.module';
 import { MemoryShopRepository } from '../src/shop/shop.repository';
 import { ShopService } from '../src/shop/shop.service';
 import { ShopCatalogService } from '../src/shop/shop-catalog.service';
-import { clone, ShopError } from '../src/shop/shop.types';
+import { BALL_ITEM_IDS, clone, ShopError } from '../src/shop/shop.types';
 
 function fakeAuth() {
   const users = new Map(
@@ -1540,6 +1540,240 @@ describe('Full Restore local inventory use', () => {
     expect((await repo.get(2)).items.tm).toBe(2);
     expect((await repo.get(2)).battleUses ?? []).toEqual([]);
   });
+  it.each(BALL_ITEM_IDS)(
+    'spends one %s at confirmed throw, keeps cash/other stock and never charges again before or after ACK',
+    async (itemId) => {
+      await service.presence(clients[2], { ready: false, localBattle: true });
+      Object.assign(repo.rows.get(2).items, {
+        'poke-ball': 1,
+        'great-ball': 1,
+        'ultra-ball': 1,
+      });
+      const before = await repo.get(2);
+      const payload = useInput({ itemId, context: 'local-battle' });
+      const used = await service.use(clients[2], payload);
+      const expectedItems = { ...before.items, [itemId]: 0 };
+      expect(used.wallet).toEqual({
+        userId: 2,
+        balance: before.balance,
+        currencyVersion: 1,
+        revision: 1,
+        items: expectedItems,
+      });
+      expect(used.use).toMatchObject({
+        itemId,
+        context: 'local-battle',
+        planHash: payload.planHash,
+        status: 'pending',
+        walletRevision: 1,
+      });
+      expect((await service.use(clients[2], payload)).wallet).toEqual(
+        used.wallet,
+      );
+      expect((await service.useCancel(clients[2], payload)).use.status).toBe(
+        'pending',
+      );
+      // The throw is already spent regardless of its externally resolved result.
+      // Its receipt can still complete after a successful catch ended the battle.
+      await service.presence(clients[2], { ready: false, localBattle: false });
+      await service.useApplied(clients[2], {
+        requestId: payload.requestId,
+        revision: 1,
+      });
+      const replay = await service.use(clients[2], payload);
+      expect(replay.use.status).toBe('applied');
+      expect(replay.wallet.items).toEqual(expectedItems);
+      expect((await repo.get(2)).uses).toHaveLength(1);
+      await service.presence(clients[2], { ready: true, localBattle: true });
+      await expect(
+        service.use(clients[2], {
+          ...payload,
+          requestId: 'throw-again',
+          expectedWalletRevision: 1,
+        }),
+      ).rejects.toMatchObject({ code: 'ITEM_UNAVAILABLE' });
+      expect((await repo.get(2)).revision).toBe(1);
+    },
+  );
+  it.each(BALL_ITEM_IDS)(
+    'rejects %s outside a local battle and rejects move selectors without changing inventory',
+    async (itemId) => {
+      repo.rows.get(2).items[itemId] = 1;
+      const party = useInput({ itemId });
+      await expect(service.use(clients[2], party)).rejects.toMatchObject({
+        code: 'PLAYER_IN_BATTLE',
+      });
+      await expect(service.useCancel(clients[2], party)).rejects.toMatchObject({
+        code: 'PLAYER_IN_BATTLE',
+      });
+      const local = { ...party, context: 'local-battle' };
+      await expect(service.use(clients[2], local)).rejects.toMatchObject({
+        code: 'PLAYER_IN_BATTLE',
+      });
+      for (const moveId of [null, 1, 33]) {
+        await expect(
+          service.use(clients[2], { ...local, moveId }),
+        ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+        await expect(
+          service.useCancel(clients[2], { ...local, moveId }),
+        ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+      }
+      expect((await repo.get(2)).items[itemId]).toBe(1);
+      expect((await repo.get(2)).uses ?? []).toEqual([]);
+    },
+  );
+  it('binds a spent ball to its original type, plan, encounter actor and browser', async () => {
+    await service.presence(clients[2], { ready: false, localBattle: true });
+    Object.assign(repo.rows.get(2).items, { 'poke-ball': 2, 'ultra-ball': 2 });
+    const payload = useInput({ itemId: 'poke-ball', context: 'local-battle' });
+    await service.use(clients[2], payload);
+    for (const change of [
+      { itemId: 'ultra-ball' },
+      { planHash: 'b'.repeat(64) },
+      { captureId: 'other-capture' },
+    ])
+      await expect(
+        service.use(clients[2], { ...payload, ...change }),
+      ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    const anotherBrowser = {
+      ...clients[2],
+      clientId: 'another-browser',
+      socketId: 'another-socket',
+    };
+    service.connect(anotherBrowser);
+    await expect(service.use(anotherBrowser, payload)).rejects.toMatchObject({
+      code: 'REQUEST_CONFLICT',
+    });
+    await expect(
+      service.useApplied(anotherBrowser, {
+        requestId: payload.requestId,
+        revision: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'OWNER_REQUIRED' });
+    expect((await repo.get(2)).items).toEqual({
+      'full-restore': 2,
+      'poke-ball': 1,
+      'ultra-ball': 2,
+    });
+  });
+  it('cancels an uncommitted throw durably while never refunding a committed ball', async () => {
+    repo.rows.get(2).items['poke-ball'] = 2;
+    const payload = useInput({ itemId: 'poke-ball', context: 'local-battle' });
+    const cancellation = await service.useCancel(clients[2], payload);
+    expect(cancellation.use).toMatchObject({
+      itemId: 'poke-ball',
+      status: 'cancelled',
+    });
+    await service.presence(clients[2], { ready: true, localBattle: true });
+    expect(
+      (await service.use(clients[2], payload)).wallet.items['poke-ball'],
+    ).toBe(2);
+    const paid = { ...payload, requestId: 'paid-throw' };
+    await service.use(clients[2], paid);
+    expect((await service.useCancel(clients[2], paid)).use.status).toBe(
+      'pending',
+    );
+    expect((await repo.get(2)).items['poke-ball']).toBe(1);
+    await service.useApplied(clients[2], {
+      requestId: paid.requestId,
+      revision: 1,
+    });
+    expect((await service.useCancel(clients[2], paid)).use.status).toBe(
+      'applied',
+    );
+    expect((await repo.get(2)).items['poke-ball']).toBe(1);
+  });
+  it('keeps an interrupted paid throw exclusive across server restart until its original browser ACKs', async () => {
+    repo.rows.get(2).items['great-ball'] = 1;
+    await service.presence(clients[2], { ready: false, localBattle: true });
+    const payload = useInput({ itemId: 'great-ball', context: 'local-battle' });
+    await service.use(clients[2], payload);
+    service = new ShopService(repo, auth as any, activity);
+    await service.onModuleInit();
+    for (const actor of Object.values(clients)) service.connect(actor);
+    expect((await service.sync(clients[2])).uses[0]).toMatchObject({
+      itemId: 'great-ball',
+      status: 'pending',
+    });
+    expect(await activity.busyUsers([2])).toEqual([2]);
+    await expect(
+      pvp.create(clients[1], {
+        commandId: 'ball-trainer',
+        playerAId: 2,
+        trainerPresetId: 'kanto-brock',
+      }),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    await expect(
+      service.reset(clients[2], {
+        requestId: 'ball-reset',
+        expectedWalletRevision: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    await expect(
+      service.balanceAdjust(clients[1], {
+        requestId: 'ball-adjust',
+        playerUserId: 2,
+        clientId: clients[2].clientId,
+        delta: 100,
+        expectedWalletRevision: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    await expect(
+      service.centerPreview(clients[1], {
+        playerUserId: 2,
+        clientId: clients[2].clientId,
+      }),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    await expect(
+      service.purchase(clients[1], input({ expectedWalletRevision: 1 })),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    expect(
+      (await service.use(clients[2], payload)).wallet.items['great-ball'],
+    ).toBe(0);
+    await service.useApplied(clients[2], {
+      requestId: payload.requestId,
+      revision: 1,
+    });
+    expect(await activity.busyUsers([2])).toEqual([]);
+    expect((await repo.get(2)).uses).toHaveLength(1);
+  });
+  it('revalidates local battle and account ownership after authentication before charging a ball', async () => {
+    repo.rows.get(2).items['ultra-ball'] = 1;
+    await service.presence(clients[2], { ready: false, localBattle: true });
+    const original = auth.authenticate.bind(auth);
+    auth.authenticate = async (token) => {
+      const identity = await original(token);
+      service.actors.get(clients[2].socketId).localBattle = false;
+      return identity;
+    };
+    await expect(
+      service.use(
+        clients[2],
+        useInput({ itemId: 'ultra-ball', context: 'local-battle' }),
+      ),
+    ).rejects.toMatchObject({ code: 'PLAYER_IN_BATTLE' });
+    expect((await repo.get(2)).items['ultra-ball']).toBe(1);
+    expect((await repo.get(2)).revision).toBe(0);
+  });
+  it.each(BALL_ITEM_IDS)(
+    'excludes %s from admin battle inventory, actions and checkpoint debits',
+    async (itemId) => {
+      repo.rows.get(2).items[itemId] = 2;
+      expect(await service.battleItemStock(2)).not.toHaveProperty(itemId);
+      expect(() =>
+        validateChoice({
+          kind: 'item',
+          item: itemId,
+          captureId: 'capture-own',
+        }),
+      ).toThrow('Objeto no disponible.');
+      await expect(
+        service.consumeBattleItem(2, 'battle', 'ball-command', itemId as any),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+      expect((await repo.get(2)).items[itemId]).toBe(2);
+      expect((await repo.get(2)).battleUses ?? []).toEqual([]);
+    },
+  );
   it('battle debit deduplicates the original key while rejecting a different item or Ether target', async () => {
     repo.rows.get(2).items['max-ether'] = 2;
     await service.consumeBattleItem(2, 'battle', 'command', 'max-ether', 1);

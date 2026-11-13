@@ -73,8 +73,14 @@ export const CONSUMABLE_ITEM_IDS = [
   'max-elixir',
 ] as const;
 export type ConsumableItemId = (typeof CONSUMABLE_ITEM_IDS)[number];
-// Battle inventory intentionally excludes learning items.
-export const USABLE_ITEM_IDS = [...CONSUMABLE_ITEM_IDS, 'tm'] as const;
+export const BALL_ITEM_IDS = ['poke-ball', 'great-ball', 'ultra-ball'] as const;
+export type BallItemId = (typeof BALL_ITEM_IDS)[number];
+// Admin battle inventory excludes learning and wild-capture items.
+export const USABLE_ITEM_IDS = [
+  ...CONSUMABLE_ITEM_IDS,
+  'tm',
+  ...BALL_ITEM_IDS,
+] as const;
 export type UsableItemId = (typeof USABLE_ITEM_IDS)[number];
 export type Wallet = {
   userId: number;

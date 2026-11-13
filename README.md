@@ -5,6 +5,21 @@ comunica las instancias React por Socket.IO. `/mensajes-prueba` permite elegir
 cualquier otro usuario registrado y conversar en privado. No hay una lista fija
 de dos correos. Las batallas y la Tienda usan los namespaces descritos abajo.
 
+## Pokebolas: namespace `/shop`
+
+React2.8.0 habilita `poke-ball`, `great-ball` y `ultra-ball` mediante los eventos
+existentes `shop:use`, `shop:use-applied` y `shop:use-cancel`. Exigen contexto
+`local-battle` y no admiten moveId. Débito1+recibo se guardan juntos; reintentos
+no cobran de nuevo y un consumo comprometido conserva el gasto. No cambia saldo
+ni otros objetos. CONSUMABLE_ITEM_IDS mantiene los tres consumibles del admin:
+las bolas no se habilitan en PvP/Trainer.
+
+D20 físico, resultado manual Capturada/Escapó y respuesta automática del salvaje
+siguen en React. El intento pagado bloquea la Party hasta guardar su resultado.
+No se traslada el motor o la Party a Nest. Ver
+[POKEBALL_PROTOCOL.md](../POKEBALL_PROTOCOL.md). Desplegar Nest antes de React;
+sin variables, MySQL, schema, seed ni borrados de datos.
+
 ## Poké Center: namespace `/shop`
 
 React2.7.0 agrega atención gratuita de uno o dos Pokémon por operación,
