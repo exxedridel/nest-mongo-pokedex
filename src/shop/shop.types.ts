@@ -18,6 +18,9 @@ export const CONSUMABLE_ITEM_IDS = [
   'max-elixir',
 ] as const;
 export type ConsumableItemId = (typeof CONSUMABLE_ITEM_IDS)[number];
+// Battle inventory intentionally excludes learning items.
+export const USABLE_ITEM_IDS = [...CONSUMABLE_ITEM_IDS, 'tm'] as const;
+export type UsableItemId = (typeof USABLE_ITEM_IDS)[number];
 export type Wallet = {
   userId: number;
   balance: number;
@@ -56,7 +59,7 @@ export type ItemUse = {
   requestId: string;
   userId: number;
   clientId: string;
-  itemId: ConsumableItemId;
+  itemId: UsableItemId;
   moveId?: number;
   captureId: string;
   context: 'party' | 'local-battle';

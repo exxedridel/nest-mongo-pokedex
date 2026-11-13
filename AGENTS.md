@@ -9,7 +9,18 @@ Acuerdo del usuario confirmado el 2026-11-08:
 
 Si esta disponible, leer [la memoria compartida](../PROJECT_MEMORY.md). Este resumen se conserva tambien aqui para sesiones que abran solo este repositorio.
 
-Etapa vigente2026-11-12 React2.4.0: PP persistentes y Max Ether350/Max Elixir700.
+Etapa vigente2026-11-12 React2.5.0: TM consumible500, sólo uso local fuera de
+combate. USABLE_ITEM_IDS/UsableItemId añade tm a ItemUse y parser shop:use/
+use-cancel; exige moveId1..354, contextparty y owner.localBattle=false antesCAS.
+Debita1 con recibo durable, stock0/replay/cancel y planHash exacto. No nuevo DTO
+replacement: hashplan enlaza efecto frontend. HashFullRestore/Ether/Elixir
+intactos. CONSUMABLE_ITEM_IDS mantiene3: TM rechazada en validateChoice,
+consumeBattleItem y stock de batalla. User conserva2inicialesgratis y reemplazo
+por1TM con4 en frontend. 74Shop/47PvP/29chat/build pasan; dist estable para QA.
+Chrome TM completo y flujos anteriores aprobados, ver memoria. Desplegar Nest luego React, sin variables/
+MySQL/schema/seed ni borrar reservas/partidas.
+
+Etapa anterior2026-11-12 React2.4.0: PP persistentes y Max Ether350/Max Elixir700.
 Usuario confirmó PP entre batallas/reloads; missing/new a máximo, Struggle con
 todos0, continuaciones/recarga sin gasto adicional. Ether selecciona movimiento,
 Elixir todos del Pokémon; admite KO y no gasta con PP completos. Motor/IA siguen

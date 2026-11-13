@@ -10,6 +10,7 @@ import { PvpModule } from '../src/pvp/pvp.module';
 import { MemoryPvpRepository } from '../src/pvp/pvp.repository';
 import { PvpService } from '../src/pvp/pvp.service';
 import { Actor } from '../src/pvp/pvp.types';
+import { validateChoice } from '../src/pvp/pvp.validation';
 import { ShopModule } from '../src/shop/shop.module';
 import { MemoryShopRepository } from '../src/shop/shop.repository';
 import { ShopService } from '../src/shop/shop.service';
@@ -1014,6 +1015,177 @@ describe('Full Restore local inventory use', () => {
     await expect(
       service.useCancel(clients[2], { ...payload, moveId: 2 }),
     ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+  });
+  it('consumes one TM outside battle, binds its learned move and cannot replay or charge another item', async () => {
+    const payload = useInput({ itemId: 'tm', moveId: 33 });
+    await expect(service.use(clients[2], payload)).rejects.toMatchObject({
+      code: 'ITEM_UNAVAILABLE',
+    });
+    repo.rows.get(2).items.tm = 1;
+    const result = await service.use(clients[2], payload);
+    expect(result.wallet).toMatchObject({
+      balance: 500,
+      revision: 1,
+      items: { tm: 0, 'full-restore': 2 },
+    });
+    expect(result.use).toMatchObject({
+      itemId: 'tm',
+      moveId: 33,
+      context: 'party',
+      status: 'pending',
+    });
+    await expect(
+      service.use(clients[2], { ...payload, moveId: 45 }),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await expect(
+      service.use(clients[2], { ...payload, itemId: 'max-ether' }),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await expect(
+      service.use(clients[2], { ...payload, planHash: 'b'.repeat(64) }),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await service.use(clients[2], payload);
+    await service.useApplied(clients[2], {
+      requestId: payload.requestId,
+      revision: 1,
+    });
+    const replay = await service.use(clients[2], payload);
+    expect(replay.use.status).toBe('applied');
+    expect(replay.wallet.items.tm).toBe(0);
+    expect((await repo.get(2)).uses).toHaveLength(1);
+    await expect(
+      service.use(clients[2], {
+        ...payload,
+        requestId: 'tm-next',
+        expectedWalletRevision: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'ITEM_UNAVAILABLE' });
+  });
+  it.each([undefined, 0, 355, 1.5])(
+    'rejects invalid TM learned move %j before debit or cancellation',
+    async (moveId) => {
+      repo.rows.get(2).items.tm = 1;
+      const payload = useInput({ itemId: 'tm', moveId });
+      await expect(service.use(clients[2], payload)).rejects.toMatchObject({
+        code: 'INVALID_INPUT',
+      });
+      await expect(
+        service.useCancel(clients[2], payload),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+      expect((await repo.get(2)).items.tm).toBe(1);
+      expect((await repo.get(2)).uses ?? []).toEqual([]);
+    },
+  );
+  it('forbids TM local-battle requests, local encounter presence and reserved Trainer battles', async () => {
+    repo.rows.get(2).items.tm = 1;
+    const payload = useInput({ itemId: 'tm', moveId: 33 });
+    await expect(
+      service.use(clients[2], { ...payload, context: 'local-battle' }),
+    ).rejects.toMatchObject({ code: 'PLAYER_IN_BATTLE' });
+    await expect(
+      service.useCancel(clients[2], { ...payload, context: 'local-battle' }),
+    ).rejects.toMatchObject({ code: 'PLAYER_IN_BATTLE' });
+    await service.presence(clients[2], { ready: false, localBattle: true });
+    await expect(service.use(clients[2], payload)).rejects.toMatchObject({
+      code: 'PLAYER_IN_BATTLE',
+    });
+    await service.presence(clients[2], { ready: true, localBattle: false });
+    await pvp.create(clients[1], {
+      commandId: 'create-tm',
+      playerAId: 2,
+      trainerPresetId: 'kanto-brock',
+    });
+    await expect(service.use(clients[2], payload)).rejects.toMatchObject({
+      code: 'PLAYER_BUSY',
+    });
+    expect((await repo.get(2)).revision).toBe(0);
+    expect((await repo.get(2)).items.tm).toBe(1);
+  });
+  it('recovers a pending TM after service restart and keeps battle/reset exclusions until ACK', async () => {
+    repo.rows.get(2).items.tm = 1;
+    const payload = useInput({ itemId: 'tm', moveId: 33 });
+    await service.use(clients[2], payload);
+    service = new ShopService(repo, auth as any, activity);
+    await service.onModuleInit();
+    service.connect(clients[2]);
+    expect((await service.sync(clients[2])).uses[0]).toMatchObject({
+      itemId: 'tm',
+      moveId: 33,
+      status: 'pending',
+    });
+    expect(await activity.busyUsers([2])).toEqual([2]);
+    await expect(
+      pvp.create(clients[1], {
+        commandId: 'create-tm',
+        playerAId: 2,
+        trainerPresetId: 'kanto-brock',
+      }),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    await expect(
+      service.reset(clients[2], {
+        requestId: 'tm-reset',
+        expectedWalletRevision: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    const replay = await service.use(clients[2], payload);
+    expect(replay.wallet.items.tm).toBe(0);
+    await service.useApplied(clients[2], {
+      requestId: payload.requestId,
+      revision: 1,
+    });
+    expect(await activity.busyUsers([2])).toEqual([]);
+    expect((await repo.get(2)).uses).toHaveLength(1);
+  });
+  it('persists a TM cancellation with its learned move and never rolls back a committed TM', async () => {
+    repo.rows.get(2).items.tm = 1;
+    const payload = useInput({ itemId: 'tm', moveId: 33 });
+    const cancelled = await service.useCancel(clients[2], payload);
+    expect(cancelled.use).toMatchObject({
+      itemId: 'tm',
+      moveId: 33,
+      status: 'cancelled',
+    });
+    expect((await service.use(clients[2], payload)).wallet.items.tm).toBe(1);
+    await expect(
+      service.useCancel(clients[2], { ...payload, moveId: 45 }),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    const committed = { ...payload, requestId: 'tm-committed' };
+    await service.use(clients[2], committed);
+    expect((await service.useCancel(clients[2], committed)).use.status).toBe(
+      'pending',
+    );
+    expect((await repo.get(2)).items.tm).toBe(0);
+    expect((await repo.get(2)).revision).toBe(1);
+  });
+  it('revalidates TM battle presence after authentication and before its atomic debit', async () => {
+    repo.rows.get(2).items.tm = 1;
+    const original = auth.authenticate.bind(auth);
+    auth.authenticate = async (token) => {
+      const identity = await original(token);
+      service.actors.get(clients[2].socketId).localBattle = true;
+      return identity;
+    };
+    await expect(
+      service.use(clients[2], useInput({ itemId: 'tm', moveId: 33 })),
+    ).rejects.toMatchObject({ code: 'PLAYER_IN_BATTLE' });
+    expect((await repo.get(2)).items.tm).toBe(1);
+    expect((await repo.get(2)).uses ?? []).toEqual([]);
+  });
+  it('excludes TM from authorized battle stock, choices and checkpoint consumption', async () => {
+    repo.rows.get(2).items.tm = 2;
+    expect(await service.battleItemStock(2)).not.toHaveProperty('tm');
+    expect(() =>
+      validateChoice({
+        kind: 'item',
+        item: 'tm',
+        captureId: 'capture-own',
+        moveId: 33,
+      }),
+    ).toThrow('Objeto no disponible.');
+    await expect(
+      service.consumeBattleItem(2, 'battle', 'command', 'tm' as any, 33),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect((await repo.get(2)).items.tm).toBe(2);
+    expect((await repo.get(2)).battleUses ?? []).toEqual([]);
   });
   it('battle debit deduplicates the original key while rejecting a different item or Ether target', async () => {
     repo.rows.get(2).items['max-ether'] = 2;

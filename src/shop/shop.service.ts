@@ -21,6 +21,8 @@ import {
   ShopPlayer,
   ShopState,
   useView,
+  USABLE_ITEM_IDS,
+  UsableItemId,
   WalletRecord,
   walletView,
 } from './shop.types';
@@ -605,9 +607,10 @@ export class ShopService implements OnModuleInit {
     integer(payload.expectedWalletRevision);
     const itemId =
       payload.itemId === undefined ? 'full-restore' : payload.itemId;
-    if (!CONSUMABLE_ITEM_IDS.includes(itemId))
+    if (!USABLE_ITEM_IDS.includes(itemId))
       fail('INVALID_INPUT', 'Objeto no disponible para usar.');
-    if (itemId === 'max-ether') integer(payload.moveId, 1, 354);
+    if (itemId === 'max-ether' || itemId === 'tm')
+      integer(payload.moveId, 1, 354);
     else if (payload.moveId !== undefined)
       fail('INVALID_INPUT', 'Este objeto no admite un movimiento objetivo.');
     if (
@@ -616,6 +619,8 @@ export class ShopService implements OnModuleInit {
       !/^[a-f0-9]{64}$/.test(payload.planHash)
     )
       fail('INVALID_INPUT', 'El plan de uso del objeto no es válido.');
+    if (itemId === 'tm' && payload.context !== 'party')
+      fail('PLAYER_IN_BATTLE', 'Las TM sólo se pueden usar fuera de combate.');
     this.self(actor);
     if (actor.user.role !== 'player')
       fail(
@@ -658,7 +663,7 @@ export class ShopService implements OnModuleInit {
     const requestHash = this.itemUseRequest(actor, payload);
     const itemId = (
       payload.itemId === undefined ? 'full-restore' : payload.itemId
-    ) as ConsumableItemId;
+    ) as UsableItemId;
     const use = await this.activity.runExclusive(
       [actor.user.id],
       async (): Promise<ItemUse> => {
@@ -742,7 +747,7 @@ export class ShopService implements OnModuleInit {
     const requestHash = this.itemUseRequest(actor, payload);
     const itemId = (
       payload.itemId === undefined ? 'full-restore' : payload.itemId
-    ) as ConsumableItemId;
+    ) as UsableItemId;
     const use = await this.activity.runExclusive(
       [actor.user.id],
       async (): Promise<ItemUse> => {

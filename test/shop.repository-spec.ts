@@ -28,6 +28,40 @@ describe('Mongo wallet atomic replacement (real Mongoose, fake driver)', () => {
     repository = new MongoShopRepository(fixture.model);
   });
   afterEach(() => fixture.dispose());
+  it('preserves pending/applied TM receipts, learned move and zero stock through Mongoose replacement', async () => {
+    await repository.insert(wallet());
+    const row = wallet();
+    row.items = { tm: 0, 'full-restore': 2 };
+    row.uses.push({
+      requestId: 'tm-learn',
+      userId: 2,
+      clientId: 'client',
+      itemId: 'tm',
+      moveId: 33,
+      captureId: 'capture',
+      context: 'party',
+      planHash: 'plan',
+      expectedWalletRevision: 0,
+      walletRevision: 1,
+      status: 'pending',
+      requestHash: 'hash',
+    });
+    row.revision = 1;
+    row.storageRevision = 1;
+    expect(await repository.compareAndSwap(row, 0)).toBe(true);
+    expect(await repository.get(2)).toEqual(row);
+    const restored = await repository.get(2);
+    restored.uses[0].status = 'applied';
+    restored.storageRevision++;
+    expect(await repository.compareAndSwap(restored, 1)).toBe(true);
+    expect((await repository.get(2)).uses[0]).toMatchObject({
+      itemId: 'tm',
+      moveId: 33,
+      status: 'applied',
+    });
+    expect((await repository.get(2)).items.tm).toBe(0);
+    expect((await repository.get(2)).revision).toBe(1);
+  });
   it('preserves consumable selectors and zero stock through an atomic wallet replacement', async () => {
     await repository.insert(wallet());
     const row = wallet();

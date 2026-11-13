@@ -19,7 +19,7 @@ Sólo una cuenta admin vigente puede comprar. El servidor decide el precio a
 partir del catálogo; rechaza saldos/precios enviados por el cliente, cantidades
 fuera de 1–99, fondos insuficientes y revisiones antiguas. Comprar guarda saldo,
 cantidades y recibo en **una única escritura CAS** con journaling. Full Restore,
-Max Ether y Max Elixir se consumen; el resto conserva cantidades para uso posterior.
+Max Ether, Max Elixir y TM se consumen; el resto conserva cantidades para uso posterior.
 Max Ether cuesta350 Pokedollars y Max Elixir700; Nest fija esos precios.
 
 Antes de cobrar, `shop:prepare` solicita al navegador seleccionado que confirme
@@ -63,7 +63,7 @@ devuelve ese mismo resultado: cancelar no revierte un reinicio confirmado.
 La cancelación impide ejecutar después una copia retrasada de la solicitud.
 Reintentar el mismo ID nunca repone fondos ni vuelve a borrar la partida.
 
-### Uso de Full Restore, Max Ether y Max Elixir
+### Uso de Full Restore, Max Ether, Max Elixir y TM
 
 `shop:use {requestId,captureId,context,planHash,expectedWalletRevision}` consume
 una unidad de la Bag del propio jugador, con contexto `party` o `local-battle`.
@@ -73,12 +73,20 @@ operación o batalla reservada. Persiste wallet y recibo `pending` en un CAS.
 `shop:use-cancel` recibe el payload original y persiste `cancelled` si todavía
 no se consumió. Los pendientes bloquean compras, reinicios y reservas de batalla.
 
-`itemId` opcional admite `full-restore`, `max-ether` o `max-elixir`; omitirlo
+`itemId` opcional admite `full-restore`, `max-ether`, `max-elixir` o `tm`; omitirlo
 conserva el contrato anterior de Full Restore. `moveId` es obligatorio sólo
-para Max Ether. Recibos y reintentos vinculan objeto, objetivo, movimiento y
+para Max Ether y TM. Recibos y reintentos vinculan objeto, objetivo, movimiento y
 plan; cambiar esos datos con el mismo ID produce conflicto. La huella de los
 recibos Full Restore anteriores permanece idéntica. El efecto y la validación
 de que faltan PP se preparan en React, que guarda antes de confirmar el débito.
+
+TM conserva su precio500 y sólo admite contexto `party`, con el jugador fuera
+de batalla. El frontend valida compatibilidad/espacios y prepara el movimiento
+o sustitución; `planHash` vincula ese resultado exacto al recibo. Nest consume1
+TM, sin modificar la Party ni calcular movimientos. `USABLE_ITEM_IDS` añade TM
+al flujo local; `CONSUMABLE_ITEM_IDS` permanece limitado a los tres objetos de
+batalla. TM se rechaza en comandos y débitos de combate. Las dos elecciones
+iniciales gratuitas son locales y no usan este recibo.
 
 En `/pvp`, sólo se aceptan elecciones item de los humanos con stock. Elegirlo
 reserva la acción sin descontar la unidad. El adaptador admin registra el comando
