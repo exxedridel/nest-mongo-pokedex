@@ -248,6 +248,8 @@ export class ShopGateway
       | 'sync'
       | 'presence'
       | 'purchase'
+      | 'gift'
+      | 'giftCancel'
       | 'applied'
       | 'reset'
       | 'resetApplied'
@@ -278,6 +280,7 @@ export class ShopGateway
       // through a fresh serialized state. No debit is rolled back on a timeout.
       if (
         operation === 'purchase' ||
+        operation === 'gift' ||
         operation === 'balanceAdjust' ||
         operation === 'centerHeal'
       )
@@ -326,6 +329,18 @@ export class ShopGateway
     @MessageBody() payload: any,
   ) {
     return this.run(socket, 'purchase', payload);
+  }
+  @SubscribeMessage('shop:gift') gift(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'gift', payload);
+  }
+  @SubscribeMessage('shop:gift-cancel') giftCancel(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'giftCancel', payload);
   }
   @SubscribeMessage('shop:price-set') priceSet(
     @ConnectedSocket() socket: Socket,

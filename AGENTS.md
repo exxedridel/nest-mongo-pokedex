@@ -9,6 +9,16 @@ Acuerdo del usuario confirmado el 2026-11-08:
 
 Si esta disponible, leer [la memoria compartida](../PROJECT_MEMORY.md). Este resumen se conserva tambien aqui para sesiones que abran solo este repositorio.
 
+Etapa vigente2026-11-14 React2.11.0: shop:gift admin1–99, ledgerpurchases kindgift
+total0/saldoigual/hashdominio propio, sincatalogquote/commit; legacyshapeintacta.
+cap supportsItemGifts+ACKPREPAREoperationgift antesCAS, metaadmin/item/qty. Validar
+cap/socket/identidad/batalla trasPREPARE; readyfalseporreserva no es errorfinal.
+gift-cancel fullpayload tombstoneprecommit cancelled storageRevonly, norefund
+postcommit, requestIDdominioadmin. Sync exacto+todospending+ownpendingotrobrowser.
+172Shop47PvP/buildPASS distestable. ChromeGiftaislado+ShopCOMPLETO PASS sinJSerrors.
+Ver memoria/ITEM_GIFTS_PROTOCOL para QAfinal.
+Nest→React/recargar2.11.0 sinvars/MySQL/migraciónmanual/seed/reset/borrados.
+
 Etapa vigente2026-11-14 React2.10.0: shop_catalog.automaticOpponents opcional
 falselegacy; snapshots siempreboolean. shop:opponent-automation-set exigeadmin
 vigente/enabledboolean/expectedCatalogRevision, CAS/journal/replay compartidos

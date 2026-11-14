@@ -5,6 +5,23 @@ comunica las instancias React por Socket.IO. `/mensajes-prueba` permite elegir
 cualquier otro usuario registrado y conversar en privado. No hay una lista fija
 de dos correos. Las batallas y la Tienda usan los namespaces descritos abajo.
 
+## Regalos de objetos: namespace `/shop`
+
+React2.11.0 añade `shop:gift` para entregar1–99 objetos desde Back office a un
+jugador conectado, fuera de batalla y sin pendientes. Usa la cartera/ledger de
+compras existentes con `kind:'gift'`, total0 y saldo sin cambios. No consulta
+precios ni modifica `shop_catalog`; conserva huellas/recibos legacy.
+
+Requiere admin vigente, capacidad `supportsItemGifts` y PREPARE con
+`operation:'gift'`. Stock+recibo pending se escriben en un CAS; `shop:applied`
+confirma el guardado comprobado del jugador. `shop:gift-cancel` cierra PREPARE
+sin entrega con un tombstone durable; un regalo ya comprometido sólo se recupera.
+Reintentos, reconexión y reload no suman dos veces. Ver
+[ITEM_GIFTS_PROTOCOL.md](../ITEM_GIFTS_PROTOCOL.md).
+
+Desplegar Nest antes de React y recargar ambos frontends a2.11.0. Sin variables
+nuevas, MySQL, migraciones manuales, seed o reinicio de partidas.
+
 ## Rivales automáticos: namespace `/shop`
 
 React2.10.0 añade el interruptor **Rivales automáticos** en Back office para

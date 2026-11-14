@@ -94,6 +94,8 @@ export type Wallet = {
   currencyVersion: 1;
 };
 export type Purchase = {
+  /** Absent for purchases, including genuine purchases priced at zero. */
+  kind?: 'gift';
   purchaseId: string;
   requestId: string;
   adminUserId: number;
@@ -106,7 +108,8 @@ export type Purchase = {
   balanceBefore: number;
   balanceAfter: number;
   walletRevision: number;
-  status: 'pending' | 'applied';
+  // Cancellation is used only by a gift that never changed the wallet.
+  status: 'pending' | 'applied' | 'cancelled';
 };
 export type StoredPurchase = Purchase & {
   requestHash: string;
@@ -158,6 +161,7 @@ export type ShopActor = Actor & {
   localBattle: boolean;
   supportsBalanceAdjustments: boolean;
   supportsCenterHealing: boolean;
+  supportsItemGifts: boolean;
 };
 export type ShopPlayer = {
   user: UserPublic;
@@ -173,6 +177,7 @@ export type ShopPlayer = {
   supportsBalanceAdjustments?: boolean;
   pendingCenter?: boolean;
   supportsCenterHealing?: boolean;
+  supportsItemGifts?: boolean;
 };
 export type ShopState = {
   catalog?: ShopCatalog;

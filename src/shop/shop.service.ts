@@ -27,6 +27,7 @@ import {
   ShopItemId,
   ShopPlayer,
   ShopState,
+  StoredPurchase,
   useView,
   USABLE_ITEM_IDS,
   UsableItemId,
@@ -51,6 +52,17 @@ function id(value: any) {
   if (typeof value !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(value))
     fail('INVALID_INPUT', 'Identificador de tienda no válido.');
 }
+function visiblePurchases(purchases: StoredPurchase[], requestId?: string) {
+  const recent = new Set(purchases.slice(-50));
+  return purchases
+    .filter(
+      (entry) =>
+        entry.status === 'pending' ||
+        recent.has(entry) ||
+        entry.requestId === requestId,
+    )
+    .map(purchaseView);
+}
 
 @Injectable()
 export class ShopService implements OnModuleInit {
@@ -62,12 +74,15 @@ export class ShopService implements OnModuleInit {
       playerUserId: number;
       clientId: string;
       expectedWalletRevision: number;
-      operation?: 'balance-adjustment';
+      operation?: 'balance-adjustment' | 'gift';
+      adminUserId?: number;
+      itemId?: ShopItemId;
+      quantity?: number;
     },
   ) => Promise<{
     ok: boolean;
     revision?: number;
-    operation?: 'balance-adjustment';
+    operation?: 'balance-adjustment' | 'gift';
     error?: { message?: string };
   }>;
   private centerSnapshotHandler?: (
@@ -200,6 +215,7 @@ export class ShopService implements OnModuleInit {
       localBattle: previous?.localBattle ?? false,
       supportsBalanceAdjustments: previous?.supportsBalanceAdjustments ?? false,
       supportsCenterHealing: previous?.supportsCenterHealing ?? false,
+      supportsItemGifts: previous?.supportsItemGifts ?? false,
     });
   }
   disconnect(socketId: string) {
@@ -257,6 +273,7 @@ export class ShopService implements OnModuleInit {
       'localBattle',
       'supportsBalanceAdjustments',
       'supportsCenterHealing',
+      'supportsItemGifts',
     ]);
     if (
       typeof payload.ready !== 'boolean' ||
@@ -264,7 +281,9 @@ export class ShopService implements OnModuleInit {
       (payload.supportsBalanceAdjustments !== undefined &&
         typeof payload.supportsBalanceAdjustments !== 'boolean') ||
       (payload.supportsCenterHealing !== undefined &&
-        typeof payload.supportsCenterHealing !== 'boolean')
+        typeof payload.supportsCenterHealing !== 'boolean') ||
+      (payload.supportsItemGifts !== undefined &&
+        typeof payload.supportsItemGifts !== 'boolean')
     )
       fail('INVALID_INPUT', 'Estado de conexión de tienda no válido.');
     this.self(actor);
@@ -281,6 +300,7 @@ export class ShopService implements OnModuleInit {
       current.supportsBalanceAdjustments =
         payload.supportsBalanceAdjustments === true;
       current.supportsCenterHealing = payload.supportsCenterHealing === true;
+      current.supportsItemGifts = payload.supportsItemGifts === true;
       await this.ensureWallet(actor.user.id);
       this.activity.changed();
       return this.state(actor, {});
@@ -292,10 +312,15 @@ export class ShopService implements OnModuleInit {
     );
   }
   private async state(actor: Actor, payload: any = {}): Promise<ShopState> {
-    object(payload, ['adjustmentRequestId', 'centerRequestId']);
+    object(payload, [
+      'adjustmentRequestId',
+      'centerRequestId',
+      'purchaseRequestId',
+    ]);
     if (payload.adjustmentRequestId !== undefined)
       id(payload.adjustmentRequestId);
     if (payload.centerRequestId !== undefined) id(payload.centerRequestId);
+    if (payload.purchaseRequestId !== undefined) id(payload.purchaseRequestId);
     this.self(actor);
     const catalog = await this.catalog.snapshot();
     if (actor.user.role === 'player') {
@@ -340,10 +365,14 @@ export class ShopService implements OnModuleInit {
             }
           : {}),
         wallet: walletView(row),
-        purchases: row.purchases
-          .filter((purchase) => purchase.clientId === actor.clientId)
-          .slice(-50)
-          .map(purchaseView),
+        purchases: visiblePurchases(
+          row.purchases.filter(
+            (purchase) =>
+              purchase.clientId === actor.clientId ||
+              (purchase.kind === 'gift' && purchase.status === 'pending'),
+          ),
+          payload.purchaseRequestId,
+        ),
         // Pending resets are visible to every browser for this account, so an
         // alternate device cannot operate while its original owner saves it.
         resets: [
@@ -438,6 +467,7 @@ export class ShopService implements OnModuleInit {
         supportsBalanceAdjustments: current.supportsBalanceAdjustments,
         pendingCenter,
         supportsCenterHealing: current.supportsCenterHealing,
+        supportsItemGifts: current.supportsItemGifts,
       });
     }
     const rows = await this.repository.forAdmin(actor.user.id);
@@ -463,12 +493,15 @@ export class ShopService implements OnModuleInit {
         )
         .map(centerView),
       ...(exactCenterHeal ? { centerHeal: centerView(exactCenterHeal) } : {}),
-      purchases: rows
-        .flatMap((row) => row.purchases)
-        .filter((purchase) => purchase.adminUserId === actor.user.id)
-        .sort((left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0))
-        .slice(-50)
-        .map(purchaseView),
+      purchases: visiblePurchases(
+        rows
+          .flatMap((row) => row.purchases)
+          .filter((purchase) => purchase.adminUserId === actor.user.id)
+          .sort(
+            (left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0),
+          ),
+        payload.purchaseRequestId,
+      ),
       adjustments: [
         ...adjustments.filter((adjustment) => adjustment.status === 'pending'),
         ...adjustments
@@ -1025,6 +1058,150 @@ export class ShopService implements OnModuleInit {
     return { ...(await this.sync(actor, {})), centerHeal: receipt };
   }
   async purchase(actor: Actor, payload: any): Promise<ShopState> {
+    return this.inventoryGrant(actor, payload);
+  }
+  async gift(actor: Actor, payload: any): Promise<ShopState> {
+    return this.inventoryGrant(actor, payload, 'gift');
+  }
+  async giftCancel(actor: Actor, payload: any): Promise<ShopState> {
+    object(payload, [
+      'requestId',
+      'adminUserId',
+      'playerUserId',
+      'clientId',
+      'itemId',
+      'quantity',
+      'expectedWalletRevision',
+    ]);
+    id(payload.requestId);
+    id(payload.clientId);
+    integer(payload.adminUserId, 1);
+    integer(payload.playerUserId, 1);
+    integer(payload.quantity, 1, 99);
+    integer(payload.expectedWalletRevision);
+    if (
+      typeof payload.itemId !== 'string' ||
+      !Object.prototype.hasOwnProperty.call(SHOP_CATALOG, payload.itemId)
+    )
+      fail('INVALID_ITEM', 'Ese objeto no está disponible en Poké Mart.');
+    const authorize = () => {
+      this.self(actor);
+      if (actor.user.role === 'admin') {
+        this.admin(actor);
+        if (actor.user.id !== payload.adminUserId)
+          fail('OWNER_REQUIRED', 'El regalo pertenece a otro administrador.');
+      } else if (
+        actor.user.role !== 'player' ||
+        actor.user.id !== payload.playerUserId ||
+        actor.clientId !== payload.clientId
+      )
+        fail(
+          'OWNER_REQUIRED',
+          'Reconecta el navegador que reservó este regalo.',
+        );
+    };
+    authorize();
+    const hash = digest([
+      'gift',
+      payload.adminUserId,
+      payload.playerUserId,
+      payload.clientId,
+      payload.itemId,
+      payload.quantity,
+      payload.expectedWalletRevision,
+    ]);
+    await this.activity.runExclusive([payload.playerUserId], async () => {
+      authorize();
+      const prior = (await this.repository.forAdmin(payload.adminUserId))
+        .flatMap((wallet) => wallet.purchases)
+        .find(
+          (entry) =>
+            entry.requestId === payload.requestId &&
+            entry.adminUserId === payload.adminUserId,
+        );
+      if (prior) {
+        if (prior.kind !== 'gift' || prior.requestHash !== hash)
+          fail(
+            'REQUEST_CONFLICT',
+            'Esa solicitud corresponde a otra operación.',
+          );
+        return;
+      }
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const row = await this.repository.get(payload.playerUserId);
+        if (!row)
+          fail(
+            'PLAYER_NOT_READY',
+            'Sincroniza la cartera antes de recuperar el regalo.',
+          );
+        const replay = row.purchases.find(
+          (entry) =>
+            entry.adminUserId === payload.adminUserId &&
+            entry.requestId === payload.requestId,
+        );
+        if (replay) {
+          if (replay.kind !== 'gift' || replay.requestHash !== hash)
+            fail(
+              'REQUEST_CONFLICT',
+              'Esa solicitud corresponde a otra operación.',
+            );
+          return;
+        }
+        if (row.purchases.length >= 4096)
+          fail(
+            'PURCHASE_LIMIT',
+            'La cuenta alcanzó el límite de historial de esta versión.',
+          );
+        if (payload.expectedWalletRevision > row.revision)
+          fail(
+            'WALLET_CONFLICT',
+            'La revisión del regalo aún no existe en la cartera.',
+          );
+        const verified = await this.auth.authenticate(actor.token);
+        if (
+          verified.user.id !== actor.user.id ||
+          verified.user.role !== actor.user.role
+        )
+          fail('OWNER_REQUIRED', 'La cuenta ya no puede cerrar este regalo.');
+        authorize();
+        const previous = row.storageRevision;
+        row.purchases.push({
+          kind: 'gift',
+          purchaseId: randomUUID(),
+          requestId: payload.requestId,
+          adminUserId: payload.adminUserId,
+          userId: payload.playerUserId,
+          clientId: payload.clientId,
+          itemId: payload.itemId,
+          quantity: payload.quantity,
+          unitPrice: 0,
+          total: 0,
+          balanceBefore: row.balance,
+          balanceAfter: row.balance,
+          // A tombstone proves the original intent, even if later transactions
+          // already advanced this wallet. No money or inventory was changed.
+          walletRevision: payload.expectedWalletRevision,
+          status: 'cancelled',
+          requestHash: hash,
+          createdAt: Date.now(),
+        });
+        row.storageRevision++;
+        if (!(await this.repository.compareAndSwap(row, previous))) continue;
+        this.activity.changed();
+        return;
+      }
+      fail(
+        'WALLET_CONFLICT',
+        'No se pudo cerrar el intento de regalo. Reintenta con la misma solicitud.',
+      );
+    });
+    return this.sync(actor, { purchaseRequestId: payload.requestId });
+  }
+  private async inventoryGrant(
+    actor: Actor,
+    payload: any,
+    kind?: 'gift',
+  ): Promise<ShopState> {
     this.admin(actor);
     object(payload, [
       'requestId',
@@ -1033,7 +1210,7 @@ export class ShopService implements OnModuleInit {
       'itemId',
       'quantity',
       'expectedWalletRevision',
-      'expectedCatalogRevision',
+      ...(kind === 'gift' ? [] : ['expectedCatalogRevision']),
     ]);
     id(payload.requestId);
     id(payload.clientId);
@@ -1058,7 +1235,11 @@ export class ShopService implements OnModuleInit {
     ];
     if (payload.expectedCatalogRevision !== undefined)
       fingerprint.push(payload.expectedCatalogRevision);
-    const hash = digest(fingerprint);
+    // Do not change the established purchase fingerprint, even when its price
+    // is zero. Gifts have a separate domain and cannot replay as a purchase.
+    const hash = digest(
+      kind === 'gift' ? ['gift', ...fingerprint] : fingerprint,
+    );
     await this.activity.runExclusive([payload.playerUserId], async () => {
       this.admin(actor);
       const prior = (await this.repository.forAdmin(actor.user.id))
@@ -1069,7 +1250,7 @@ export class ShopService implements OnModuleInit {
             purchase.requestId === payload.requestId,
         );
       if (prior) {
-        if (prior.requestHash !== hash)
+        if (prior.kind !== kind || prior.requestHash !== hash)
           fail(
             'REQUEST_CONFLICT',
             'Esa solicitud ya corresponde a otra compra.',
@@ -1089,15 +1270,18 @@ export class ShopService implements OnModuleInit {
             purchase.adminUserId === actor.user.id,
         );
         if (replay) {
-          if (replay.requestHash !== hash)
+          if (replay.kind !== kind || replay.requestHash !== hash)
             fail(
               'REQUEST_CONFLICT',
               'Esa solicitud ya corresponde a otra compra.',
             );
           return;
         }
-        const quote = await this.catalog.quote(payload.expectedCatalogRevision);
-        const unitPrice = quote.prices[itemId];
+        const quote =
+          kind === 'gift'
+            ? undefined
+            : await this.catalog.quote(payload.expectedCatalogRevision);
+        const unitPrice = kind === 'gift' ? 0 : quote.prices[itemId];
         const total = unitPrice * payload.quantity;
         await this.activity.assertAvailable([payload.playerUserId]);
         const candidate = this.current(payload.playerUserId);
@@ -1127,6 +1311,11 @@ export class ShopService implements OnModuleInit {
           fail(
             'PLAYER_IN_BATTLE',
             'El jugador debe terminar su batalla antes de comprar.',
+          );
+        if (kind === 'gift' && !latest.supportsItemGifts)
+          fail(
+            'PLAYER_UPDATE_REQUIRED',
+            'El jugador debe actualizar su aplicación antes de recibir objetos.',
           );
         if (row.revision !== payload.expectedWalletRevision)
           fail(
@@ -1161,8 +1350,20 @@ export class ShopService implements OnModuleInit {
           playerUserId: payload.playerUserId,
           clientId: payload.clientId,
           expectedWalletRevision: payload.expectedWalletRevision,
+          ...(kind === 'gift'
+            ? {
+                operation: 'gift' as const,
+                adminUserId: actor.user.id,
+                itemId,
+                quantity: payload.quantity,
+              }
+            : {}),
         });
-        if (!prepared?.ok || prepared.revision !== row.revision)
+        if (
+          !prepared?.ok ||
+          prepared.revision !== row.revision ||
+          (kind === 'gift' && prepared.operation !== 'gift')
+        )
           fail(
             'PLAYER_NOT_READY',
             prepared?.error?.message ??
@@ -1209,7 +1410,13 @@ export class ShopService implements OnModuleInit {
             'El jugador cambió de conexión o entró en batalla antes de guardar la compra.',
           );
         const previous = row.storageRevision;
+        if (kind === 'gift' && !finalOwner.supportsItemGifts)
+          fail(
+            'PLAYER_UPDATE_REQUIRED',
+            'El jugador cambió su compatibilidad antes de guardar el regalo.',
+          );
         const purchase: Purchase = {
+          ...(kind === 'gift' ? { kind } : {}),
           purchaseId: randomUUID(),
           requestId: payload.requestId,
           adminUserId: actor.user.id,
@@ -1234,9 +1441,11 @@ export class ShopService implements OnModuleInit {
           createdAt: Date.now(),
         });
         if (
-          !(await this.catalog.commit(quote.revision, () =>
-            this.repository.compareAndSwap(row, previous),
-          ))
+          !(kind === 'gift'
+            ? await this.repository.compareAndSwap(row, previous)
+            : await this.catalog.commit(quote.revision, () =>
+                this.repository.compareAndSwap(row, previous),
+              ))
         )
           continue;
         this.activity.changed();
@@ -1247,7 +1456,10 @@ export class ShopService implements OnModuleInit {
         'Otra operación actualizó la cuenta. Sincroniza y reintenta.',
       );
     });
-    return this.sync(actor, {});
+    return this.sync(
+      actor,
+      kind === 'gift' ? { purchaseRequestId: payload.requestId } : {},
+    );
   }
   async priceSet(actor: Actor, payload: any): Promise<ShopState> {
     this.admin(actor);
@@ -1705,7 +1917,8 @@ export class ShopService implements OnModuleInit {
             'WALLET_CONFLICT',
             'La confirmación no corresponde a la revisión de la compra.',
           );
-        if (purchase.status === 'applied') return;
+        if (purchase.status === 'applied' || purchase.status === 'cancelled')
+          return;
         const current = this.current(actor.user.id);
         if (
           !current ||

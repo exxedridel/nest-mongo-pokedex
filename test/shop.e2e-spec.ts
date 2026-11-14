@@ -10,12 +10,17 @@ import { PvpModule } from '../src/pvp/pvp.module';
 import { MemoryPvpRepository } from '../src/pvp/pvp.repository';
 import { PvpService } from '../src/pvp/pvp.service';
 import { Actor } from '../src/pvp/pvp.types';
-import { validateChoice } from '../src/pvp/pvp.validation';
+import { digest, validateChoice } from '../src/pvp/pvp.validation';
 import { ShopModule } from '../src/shop/shop.module';
 import { MemoryShopRepository } from '../src/shop/shop.repository';
 import { ShopService } from '../src/shop/shop.service';
 import { ShopCatalogService } from '../src/shop/shop-catalog.service';
-import { BALL_ITEM_IDS, clone, ShopError } from '../src/shop/shop.types';
+import {
+  BALL_ITEM_IDS,
+  clone,
+  ShopError,
+  SHOP_CATALOG,
+} from '../src/shop/shop.types';
 
 function fakeAuth() {
   const users = new Map(
@@ -1800,6 +1805,598 @@ describe('Full Restore local inventory use', () => {
   });
 });
 
+describe('Durable administrator item gifts', () => {
+  let auth: ReturnType<typeof fakeAuth>,
+    clients: Record<number, Actor>,
+    repo: MemoryShopRepository,
+    activity: PlayerActivityService,
+    service: ShopService;
+  const request = (overrides: Record<string, any> = {}) =>
+    input({
+      requestId: 'item-gift-1',
+      itemId: 'tm',
+      quantity: 3,
+      ...overrides,
+    });
+  const cancel = (overrides: Record<string, any> = {}) => ({
+    adminUserId: 1,
+    ...request(),
+    ...overrides,
+  });
+  const presence = { ready: true, localBattle: false, supportsItemGifts: true };
+  beforeEach(async () => {
+    auth = fakeAuth();
+    clients = actors(auth);
+    repo = new MemoryShopRepository();
+    activity = new PlayerActivityService();
+    service = new ShopService(repo, auth as any, activity);
+    await service.onModuleInit();
+    Object.values(clients).forEach((actor) => service.connect(actor));
+    for (const id of [2, 3]) await service.presence(clients[id], presence);
+    service.setPrepareHandler(async (_owner, request) => ({
+      ok: true,
+      revision: request.expectedWalletRevision,
+      operation: request.operation,
+    }));
+  });
+  it('grants every catalogued item without quoting prices, changing cash or modifying the catalogue', async () => {
+    const before = await service.catalog.snapshot();
+    const quote = jest.spyOn(service.catalog, 'quote');
+    const commit = jest.spyOn(service.catalog, 'commit');
+    repo.rows.get(2).balance = 0;
+    let revision = 0;
+    for (const itemId of Object.keys(SHOP_CATALOG)) {
+      const result = await service.gift(
+        clients[1],
+        request({
+          requestId: `gift-${itemId}`,
+          itemId,
+          quantity: 99,
+          expectedWalletRevision: revision,
+        }),
+      );
+      const receipt = result.purchases.find(
+        (entry) => entry.requestId === `gift-${itemId}`,
+      );
+      expect(receipt).toMatchObject({
+        kind: 'gift',
+        itemId,
+        quantity: 99,
+        unitPrice: 0,
+        total: 0,
+        balanceBefore: 0,
+        balanceAfter: 0,
+        walletRevision: ++revision,
+        status: 'pending',
+      });
+      expect(result.players.find((entry) => entry.user.id === 2)).toMatchObject(
+        {
+          supportsItemGifts: true,
+          pending: true,
+        },
+      );
+      await service.applied(clients[2], {
+        purchaseId: receipt.purchaseId,
+        revision,
+      });
+    }
+    expect((await repo.get(2)).items).toEqual(
+      Object.fromEntries(Object.keys(SHOP_CATALOG).map((key) => [key, 99])),
+    );
+    expect((await repo.get(2)).balance).toBe(0);
+    expect(await service.catalog.snapshot()).toEqual(before);
+    expect(quote).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+  });
+  it('rejects non-admin grants, invalid quantities/items and client prices or catalogue revisions', async () => {
+    await expect(service.gift(clients[2], request())).rejects.toMatchObject({
+      code: 'ADMIN_REQUIRED',
+    });
+    for (const quantity of [0, -1, 100, 1.5, '1', null, NaN, Infinity])
+      await expect(
+        service.gift(clients[1], request({ quantity })),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    for (const itemId of ['__proto__', 'unknown', null])
+      await expect(
+        service.gift(clients[1], request({ itemId })),
+      ).rejects.toMatchObject({ code: 'INVALID_ITEM' });
+    for (const extra of [
+      { unitPrice: 0 },
+      { total: 0 },
+      { expectedCatalogRevision: 0 },
+    ])
+      await expect(
+        service.gift(clients[1], request(extra)),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(
+      service.presence(clients[2], { ...presence, supportsItemGifts: 'true' }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect((await repo.get(2)).purchases).toEqual([]);
+  });
+  it('requires advertised gift support and an exact operation-aware PREPARE acknowledgement', async () => {
+    const prepare = jest.fn(async (_owner: any, _request: any) => ({
+      ok: true,
+      revision: 0,
+    }));
+    service.setPrepareHandler(prepare);
+    await service.presence(clients[2], { ready: true, localBattle: false });
+    await expect(service.gift(clients[1], request())).rejects.toMatchObject({
+      code: 'PLAYER_UPDATE_REQUIRED',
+    });
+    expect(prepare).not.toHaveBeenCalled();
+    await service.presence(clients[2], presence);
+    await expect(service.gift(clients[1], request())).rejects.toMatchObject({
+      code: 'PLAYER_NOT_READY',
+    });
+    expect(prepare.mock.calls[0][1]).toEqual({
+      requestId: 'item-gift-1',
+      playerUserId: 2,
+      clientId: 'shop-client-2',
+      expectedWalletRevision: 0,
+      operation: 'gift',
+      adminUserId: 1,
+      itemId: 'tm',
+      quantity: 3,
+    });
+    expect((await repo.get(2)).revision).toBe(0);
+  });
+  it.each([
+    ['capability', 'PLAYER_UPDATE_REQUIRED'],
+    ['battle', 'PLAYER_NOT_READY'],
+    ['disconnect', 'PLAYER_NOT_READY'],
+    ['player-role', 'INVALID_PLAYER'],
+    ['admin-role', 'ADMIN_REQUIRED'],
+  ])(
+    'revalidates %s after PREPARE before writing an item gift',
+    async (change, code) => {
+      service.setPrepareHandler(async (_owner, selection) => {
+        const player = service.actors.get(clients[2].socketId);
+        if (change === 'capability') player.supportsItemGifts = false;
+        if (change === 'battle') player.localBattle = true;
+        if (change === 'disconnect') service.disconnect(player.socketId);
+        if (change === 'player-role') auth.users.get(2).role = 'admin';
+        if (change === 'admin-role') auth.users.get(1).role = 'player';
+        return {
+          ok: true,
+          revision: selection.expectedWalletRevision,
+          operation: 'gift',
+        };
+      });
+      await expect(service.gift(clients[1], request())).rejects.toMatchObject({
+        code,
+      });
+      expect((await repo.get(2)).items).toEqual({});
+      expect((await repo.get(2)).purchases).toEqual([]);
+    },
+  );
+  it('preserves exact legacy purchase hashes and distinguishes gifts from genuine free purchases', async () => {
+    const purchase = input();
+    await service.purchase(clients[1], purchase);
+    const stored = (await repo.get(2)).purchases[0];
+    expect(stored).not.toHaveProperty('kind');
+    expect(stored.requestHash).toBe(
+      digest([1, 2, 'shop-client-2', 'poke-ball', 1, 0]),
+    );
+    await expect(service.gift(clients[1], purchase)).rejects.toMatchObject({
+      code: 'REQUEST_CONFLICT',
+    });
+    await service.applied(clients[2], {
+      purchaseId: stored.purchaseId,
+      revision: 1,
+    });
+    const giftRequest = request({ expectedWalletRevision: 1 });
+    await service.gift(clients[1], giftRequest);
+    await expect(
+      service.purchase(clients[1], giftRequest),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    const gift = (await repo.get(2)).purchases[1];
+    expect(gift.requestHash).toBe(
+      digest(['gift', 1, 2, 'shop-client-2', 'tm', 3, 1]),
+    );
+    await service.applied(clients[2], {
+      purchaseId: gift.purchaseId,
+      revision: 2,
+    });
+    await service.priceSet(clients[1], {
+      requestId: 'free',
+      itemId: 'tm',
+      price: 0,
+      expectedCatalogRevision: 0,
+    });
+    await service.purchase(
+      clients[1],
+      request({
+        requestId: 'true-free',
+        expectedWalletRevision: 2,
+        expectedCatalogRevision: 1,
+      }),
+    );
+    expect((await repo.get(2)).purchases[2]).toMatchObject({
+      unitPrice: 0,
+      total: 0,
+    });
+    expect((await repo.get(2)).purchases[2]).not.toHaveProperty('kind');
+  });
+  it('retries CAS and resumes the same gift after restart, disconnect and price changes without another increment', async () => {
+    jest.spyOn(repo, 'compareAndSwap').mockResolvedValueOnce(false);
+    const result = await service.gift(clients[1], request());
+    const original = clone((await repo.get(2)).purchases[0]);
+    const restarted = new ShopService(
+      repo,
+      auth as any,
+      new PlayerActivityService(),
+      service.catalog,
+    );
+    await restarted.onModuleInit();
+    restarted.connect(clients[1]);
+    await service.priceSet(clients[1], {
+      requestId: 'price-after-gift',
+      itemId: 'tm',
+      price: 1,
+      expectedCatalogRevision: 0,
+    });
+    expect((await restarted.gift(clients[1], request())).purchases).toEqual(
+      result.purchases,
+    );
+    await expect(
+      restarted.gift(clients[1], request({ quantity: 4 })),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    expect((await repo.get(2)).purchases).toEqual([original]);
+    expect((await repo.get(2)).items.tm).toBe(3);
+    expect((await repo.get(2)).revision).toBe(1);
+  });
+  it('blocks competing operations until the original browser confirms and keeps receipts private', async () => {
+    const result = await service.gift(clients[1], request());
+    const receipt = result.purchases[0];
+    await expect(activity.assertAvailable([2])).rejects.toMatchObject({
+      code: 'PLAYER_BUSY',
+    });
+    await expect(
+      service.purchase(clients[1], input({ expectedWalletRevision: 1 })),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    await expect(
+      service.reset(clients[2], resetInput({ expectedWalletRevision: 1 })),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    await expect(
+      service.gift(
+        clients[1],
+        request({ requestId: 'next', expectedWalletRevision: 1 }),
+      ),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    expect((await service.sync(clients[3])).purchases).toEqual([]);
+    expect((await service.sync(clients[4])).purchases).toEqual([]);
+    await expect(
+      service.applied(clients[3], {
+        purchaseId: receipt.purchaseId,
+        revision: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'OWNER_REQUIRED' });
+    await service.applied(clients[2], {
+      purchaseId: receipt.purchaseId,
+      revision: 1,
+    });
+    await expect(activity.assertAvailable([2])).resolves.toBeUndefined();
+    expect(
+      (await service.gift(clients[1], request())).purchases[0].status,
+    ).toBe('applied');
+  });
+  it('rejects stale wallets, battles, overflow and full ledgers before reserving the frontend', async () => {
+    const prepare = jest.fn();
+    service.setPrepareHandler(prepare);
+    await expect(
+      service.gift(clients[1], request({ expectedWalletRevision: 1 })),
+    ).rejects.toMatchObject({ code: 'WALLET_CONFLICT' });
+    service.actors.get(clients[2].socketId).localBattle = true;
+    await expect(service.gift(clients[1], request())).rejects.toMatchObject({
+      code: 'PLAYER_IN_BATTLE',
+    });
+    service.actors.get(clients[2].socketId).localBattle = false;
+    repo.rows.get(2).items.tm = Number.MAX_SAFE_INTEGER;
+    await expect(service.gift(clients[1], request())).rejects.toMatchObject({
+      code: 'ITEM_LIMIT',
+    });
+    repo.rows.get(2).items.tm = 0;
+    repo.rows.get(2).purchases = Array.from(
+      { length: 4096 },
+      (_, index) =>
+        ({
+          requestId: `old-${index}`,
+          adminUserId: 1,
+          status: 'applied',
+        }) as any,
+    );
+    await expect(service.gift(clients[1], request())).rejects.toMatchObject({
+      code: 'PURCHASE_LIMIT',
+    });
+    expect(prepare).not.toHaveBeenCalled();
+  });
+  it('persists precommit cancellation without money, inventory or wallet revision changes and fences delayed grants', async () => {
+    const before = await repo.get(2);
+    const cancelled = await service.giftCancel(clients[2], cancel());
+    expect(cancelled.purchases[0]).toMatchObject({
+      kind: 'gift',
+      status: 'cancelled',
+      walletRevision: 0,
+      balanceBefore: 500,
+      balanceAfter: 500,
+      unitPrice: 0,
+      total: 0,
+    });
+    const after = await repo.get(2);
+    expect(after.balance).toBe(before.balance);
+    expect(after.items).toEqual(before.items);
+    expect(after.revision).toBe(before.revision);
+    expect(after.storageRevision).toBe(before.storageRevision + 1);
+    expect(
+      (await service.gift(clients[1], request())).purchases[0].status,
+    ).toBe('cancelled');
+    await service.giftCancel(clients[1], cancel());
+    expect((await repo.get(2)).purchases).toHaveLength(1);
+    await expect(
+      service.gift(clients[1], request({ quantity: 1 })),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await expect(service.purchase(clients[1], request())).rejects.toMatchObject(
+      { code: 'REQUEST_CONFLICT' },
+    );
+    await expect(activity.assertAvailable([2])).resolves.toBeUndefined();
+  });
+  it('restricts cancellation to the original administrator or owning player browser and checks exact selection', async () => {
+    for (const actor of [
+      clients[3],
+      clients[4],
+      { ...clients[2], clientId: 'other-browser' },
+    ])
+      await expect(service.giftCancel(actor, cancel())).rejects.toMatchObject({
+        code: 'OWNER_REQUIRED',
+      });
+    await expect(
+      service.giftCancel(clients[1], cancel({ expectedWalletRevision: 1 })),
+    ).rejects.toMatchObject({ code: 'WALLET_CONFLICT' });
+    await service.giftCancel(clients[1], cancel());
+    await expect(
+      service.giftCancel(clients[1], cancel({ itemId: 'max-ether' })),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    expect((await repo.get(2)).revision).toBe(0);
+  });
+  it('cancels an orphan after failed PREPARE and never executes it after a late retry', async () => {
+    service.setPrepareHandler(async () => {
+      throw new Error('PREPARE timed out');
+    });
+    await expect(service.gift(clients[1], request())).rejects.toThrow(
+      'PREPARE timed out',
+    );
+    await service.giftCancel(clients[2], cancel());
+    const prepare = jest.fn();
+    service.setPrepareHandler(prepare);
+    expect(
+      (await service.gift(clients[1], request())).purchases[0].status,
+    ).toBe('cancelled');
+    expect(prepare).not.toHaveBeenCalled();
+    expect((await repo.get(2)).items).toEqual({});
+  });
+  it('serializes a cancellation behind an in-flight PREPARE without reverting a committed gift', async () => {
+    let release: () => void, entered: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    service.setPrepareHandler(async (_owner, selection) => {
+      entered();
+      await hold;
+      return {
+        ok: true,
+        revision: selection.expectedWalletRevision,
+        operation: 'gift',
+      };
+    });
+    const grant = service.gift(clients[1], request());
+    await started;
+    const closing = service.giftCancel(clients[2], cancel());
+    release();
+    await grant;
+    expect((await closing).purchases[0].status).toBe('pending');
+    expect((await repo.get(2)).items.tm).toBe(3);
+    expect((await repo.get(2)).revision).toBe(1);
+  });
+  it('cannot cancel paid inventory after commit or resurrect a cancelled gift through late APPLIED', async () => {
+    const receipt = (await service.gift(clients[1], request())).purchases[0];
+    expect(
+      (await service.giftCancel(clients[1], cancel())).purchases[0].status,
+    ).toBe('pending');
+    await service.applied(clients[2], {
+      purchaseId: receipt.purchaseId,
+      revision: 1,
+    });
+    expect(
+      (await service.giftCancel(clients[2], cancel())).purchases[0].status,
+    ).toBe('applied');
+    const cancelled = (
+      await service.giftCancel(
+        clients[2],
+        cancel({ requestId: 'orphan-next', expectedWalletRevision: 1 }),
+      )
+    ).purchases.find((entry) => entry.requestId === 'orphan-next');
+    await service.applied(clients[2], {
+      purchaseId: cancelled.purchaseId,
+      revision: 1,
+    });
+    expect((await repo.get(2)).purchases[1].status).toBe('cancelled');
+    expect((await repo.get(2)).items.tm).toBe(3);
+    expect((await repo.get(2)).balance).toBe(500);
+  });
+  it('returns an exact historical gift outside the recent fifty while preserving client and admin isolation', async () => {
+    await service.giftCancel(clients[2], cancel());
+    const row = repo.rows.get(2),
+      original = clone(row.purchases[0]);
+    row.purchases.push(
+      ...Array.from({ length: 60 }, (_, index) => ({
+        ...clone(original),
+        purchaseId: `new-${index}`,
+        requestId: `new-${index}`,
+        createdAt: Date.now() + index + 1,
+      })),
+    );
+    expect((await service.sync(clients[2])).purchases).toHaveLength(50);
+    expect(
+      (await service.sync(clients[2], { purchaseRequestId: 'item-gift-1' }))
+        .purchases[0].requestId,
+    ).toBe('item-gift-1');
+    expect(
+      (await service.sync(clients[1], { purchaseRequestId: 'item-gift-1' }))
+        .purchases[0].requestId,
+    ).toBe('item-gift-1');
+    expect(
+      (await service.sync(clients[3], { purchaseRequestId: 'item-gift-1' }))
+        .purchases,
+    ).toEqual([]);
+    expect(
+      (await service.gift(clients[1], request())).purchases[0].status,
+    ).toBe('cancelled');
+    const alternate = {
+      ...clients[2],
+      socketId: 'alternate-socket',
+      clientId: 'alternate-client',
+    };
+    service.connect(alternate);
+    expect(
+      (await service.sync(alternate, { purchaseRequestId: 'item-gift-1' }))
+        .purchases,
+    ).toEqual([]);
+    expect(row.purchases[0]).toEqual(original);
+  });
+  it('publishes every pending gift even when it falls outside the most recent fifty receipts', async () => {
+    await service.gift(clients[1], request());
+    const row = repo.rows.get(2),
+      pending = clone(row.purchases[0]);
+    row.purchases.push(
+      ...Array.from({ length: 60 }, (_, index) => ({
+        ...clone(pending),
+        purchaseId: `later-${index}`,
+        requestId: `later-${index}`,
+        status: 'applied' as const,
+        createdAt: Date.now() + index + 1,
+      })),
+    );
+    const admin = await service.sync(clients[1]);
+    const owner = await service.sync(clients[2]);
+    expect(admin.purchases).toHaveLength(51);
+    expect(owner.purchases).toHaveLength(51);
+    expect(admin.purchases[0]).toMatchObject({
+      requestId: request().requestId,
+      status: 'pending',
+      kind: 'gift',
+    });
+    expect((await service.sync(clients[4])).purchases).toEqual([]);
+  });
+  it('exposes a pending gift only within its own account across browsers while requiring original-client APPLIED', async () => {
+    const receipt = (await service.gift(clients[1], request())).purchases[0];
+    const alternate = {
+      ...clients[2],
+      socketId: 'gift-alternate-socket',
+      clientId: 'gift-alternate-client',
+    };
+    service.connect(alternate);
+    await service.presence(alternate, { ...presence, ready: false });
+    const alternateState = await service.sync(alternate);
+    expect(alternateState.purchases[0]).toMatchObject({
+      kind: 'gift',
+      status: 'pending',
+      clientId: clients[2].clientId,
+    });
+    expect(
+      (await service.sync(clients[1])).players.find(
+        (entry) => entry.user.id === 2,
+      ),
+    ).toMatchObject({ ready: false, pending: true });
+    await expect(
+      service.applied(alternate, {
+        purchaseId: receipt.purchaseId,
+        revision: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'OWNER_REQUIRED' });
+    expect((await service.sync(clients[3])).purchases).toEqual([]);
+    const original = { ...clients[2], socketId: 'gift-original-reconnected' };
+    service.connect(original);
+    await service.applied(original, {
+      purchaseId: receipt.purchaseId,
+      revision: 1,
+    });
+    expect((await service.sync(alternate)).purchases).toEqual([]);
+    await service.presence(original, presence);
+    await service.purchase(
+      clients[1],
+      input({ requestId: 'legacy-pending', expectedWalletRevision: 1 }),
+    );
+    expect((await service.sync(alternate)).purchases).toEqual([]);
+    expect((await repo.get(2)).purchases[0].status).toBe('applied');
+  });
+  it('fences an exact player connection lost during final authentication after its PREPARE succeeded', async () => {
+    const original = auth.authenticate.bind(auth);
+    let playerAuthentications = 0;
+    auth.authenticate = async (token) => {
+      const result = await original(token);
+      if (token === clients[2].token && ++playerAuthentications === 2)
+        service.disconnect(clients[2].socketId);
+      return result;
+    };
+    await expect(service.gift(clients[1], request())).rejects.toMatchObject({
+      code: 'PLAYER_NOT_READY',
+    });
+    expect((await repo.get(2)).purchases).toEqual([]);
+    expect((await repo.get(2)).items).toEqual({});
+  });
+  it('accepts the prepared browser becoming not ready while its own gift lock waits for final authentication', async () => {
+    const original = auth.authenticate.bind(auth);
+    let playerAuthentications = 0,
+      entered: () => void,
+      release: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    auth.authenticate = async (token) => {
+      const result = await original(token);
+      if (token === clients[2].token && ++playerAuthentications === 2) {
+        entered();
+        await hold;
+      }
+      return result;
+    };
+    const granting = service.gift(clients[1], request());
+    await started;
+    // A PREPARE lock makes the original browser unavailable for another
+    // operation. It does not invalidate the transaction it already reserved.
+    service.actors.get(clients[2].socketId).ready = false;
+    release();
+    expect((await granting).purchases[0]).toMatchObject({
+      kind: 'gift',
+      status: 'pending',
+    });
+    expect((await repo.get(2)).items.tm).toBe(3);
+  });
+  it('does not expose a gift or debit when its durable CAS fails, and safely closes the saved PREPARE', async () => {
+    const original = repo.compareAndSwap.bind(repo);
+    jest
+      .spyOn(repo, 'compareAndSwap')
+      .mockRejectedValueOnce(new Error('storage unavailable'));
+    await expect(service.gift(clients[1], request())).rejects.toThrow(
+      'storage unavailable',
+    );
+    expect((await repo.get(2)).purchases).toEqual([]);
+    expect((await repo.get(2)).revision).toBe(0);
+    expect((await repo.get(2)).items).toEqual({});
+    (repo.compareAndSwap as jest.Mock).mockImplementation(original);
+    jest.spyOn(repo, 'compareAndSwap').mockResolvedValueOnce(false);
+    await service.giftCancel(clients[2], cancel());
+    expect((await repo.get(2)).purchases[0].status).toBe('cancelled');
+    expect((await repo.get(2)).revision).toBe(0);
+  });
+});
+
 describe('Shop Socket.IO authenticated namespace', () => {
   let app: INestApplication, auth: ReturnType<typeof fakeAuth>, rootUrl: string;
   const sockets: Socket[] = [];
@@ -1844,6 +2441,112 @@ describe('Shop Socket.IO authenticated namespace', () => {
     });
     return socket;
   }
+  it('gifts items through an operation-aware player PREPARE and publishes private receipts without changing cash or prices', async () => {
+    const admin = await connect(1),
+      player = await connect(2),
+      other = await connect(3);
+    await emit(player, 'shop:presence', { ready: true, localBattle: false });
+    await emit(other, 'shop:presence', { ready: true, localBattle: false });
+    const request = input({
+      requestId: 'socket-gift',
+      itemId: 'tm',
+      quantity: 9,
+    });
+    expect((await emit(admin, 'shop:gift', request)).error.code).toBe(
+      'PLAYER_UPDATE_REQUIRED',
+    );
+    await emit(player, 'shop:presence', {
+      ready: true,
+      localBattle: false,
+      supportsItemGifts: true,
+    });
+    let prepared: any;
+    player.on('shop:prepare', (selection, ack) => {
+      prepared = selection;
+      ack({
+        ok: true,
+        revision: selection.expectedWalletRevision,
+        operation: selection.operation,
+      });
+    });
+    const before = (await emit(admin, 'shop:sync', {})).catalog;
+    const granted = await emit(admin, 'shop:gift', request);
+    expect(granted.ok).toBe(true);
+    expect(prepared).toMatchObject({
+      operation: 'gift',
+      adminUserId: 1,
+      itemId: 'tm',
+      quantity: 9,
+    });
+    expect(granted.catalog).toEqual(before);
+    expect(granted.purchases[0]).toMatchObject({
+      kind: 'gift',
+      unitPrice: 0,
+      total: 0,
+      balanceBefore: 500,
+      balanceAfter: 500,
+      status: 'pending',
+    });
+    const own = await emit(player, 'shop:sync', {
+      purchaseRequestId: request.requestId,
+    });
+    expect(own.wallet).toMatchObject({
+      balance: 500,
+      revision: 1,
+      items: { tm: 9 },
+    });
+    expect((await emit(other, 'shop:sync', {})).purchases).toEqual([]);
+    expect((await emit(player, 'shop:gift', request)).error.code).toBe(
+      'ADMIN_REQUIRED',
+    );
+    const receipt = own.purchases[0];
+    await emit(player, 'shop:applied', {
+      purchaseId: receipt.purchaseId,
+      revision: 1,
+    });
+    expect((await emit(admin, 'shop:gift', request)).purchases[0].status).toBe(
+      'applied',
+    );
+    expect(
+      (await emit(admin, 'shop:sync', {})).players.find(
+        (entry) => entry.user.id === 2,
+      ).pending,
+    ).toBe(false);
+  });
+  it('persists a player gift-cancel tombstone over WebSocket and fences any later admin submission', async () => {
+    const admin = await connect(1),
+      player = await connect(2),
+      other = await connect(3);
+    await emit(player, 'shop:sync', {});
+    const request = input({
+      requestId: 'never-gifted',
+      itemId: 'max-ether',
+      quantity: 2,
+    });
+    const closed = await emit(player, 'shop:gift-cancel', {
+      ...request,
+      adminUserId: 1,
+    });
+    expect(closed.ok).toBe(true);
+    expect(closed.purchases[0]).toMatchObject({
+      kind: 'gift',
+      status: 'cancelled',
+      walletRevision: 0,
+    });
+    expect(closed.wallet).toMatchObject({
+      balance: 500,
+      revision: 0,
+      items: {},
+    });
+    expect((await emit(admin, 'shop:gift', request)).purchases[0].status).toBe(
+      'cancelled',
+    );
+    expect(
+      (await emit(other, 'shop:gift-cancel', { ...request, adminUserId: 1 }))
+        .error.code,
+    ).toBe('OWNER_REQUIRED');
+    expect((await emit(player, 'shop:sync', {})).wallet.items).toEqual({});
+  });
   it('publishes opponent automation to every player through the admin-only event without changing wallets', async () => {
     const admin = await connect(1),
       player = await connect(2),

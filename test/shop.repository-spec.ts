@@ -33,6 +33,71 @@ describe('Mongo wallet atomic replacement (real Mongoose, fake driver)', () => {
     repository = new MongoShopRepository(fixture.model);
   });
   afterEach(() => fixture.dispose());
+  it('roundtrips item gift receipts and precommit tombstones without rewriting a legacy purchase', async () => {
+    const row = wallet();
+    const legacy = {
+      purchaseId: 'old-purchase',
+      requestId: 'old-request',
+      adminUserId: 1,
+      userId: 2,
+      clientId: 'client',
+      itemId: 'poke-ball' as const,
+      quantity: 1,
+      unitPrice: 150,
+      total: 150,
+      balanceBefore: 650,
+      balanceAfter: 500,
+      walletRevision: 0,
+      status: 'applied' as const,
+      requestHash: 'old-hash',
+    };
+    row.purchases = [
+      legacy,
+      {
+        ...legacy,
+        kind: 'gift',
+        purchaseId: 'gift',
+        requestId: 'gift-request',
+        itemId: 'tm',
+        quantity: 3,
+        unitPrice: 0,
+        total: 0,
+        balanceBefore: 500,
+        walletRevision: 1,
+        status: 'pending',
+        requestHash: 'gift-hash',
+      },
+    ];
+    row.items.tm = 3;
+    row.revision = 1;
+    row.storageRevision = 1;
+    await repository.insert(row);
+    const restored = await repository.get(2);
+    expect(restored.purchases[0]).toEqual(legacy);
+    expect(restored.purchases[0]).not.toHaveProperty('kind');
+    restored.purchases[1].status = 'applied';
+    restored.purchases.push({
+      ...restored.purchases[1],
+      purchaseId: 'cancelled-gift',
+      requestId: 'cancelled-request',
+      status: 'cancelled',
+      requestHash: 'cancel-hash',
+    });
+    restored.storageRevision++;
+    expect(await repository.compareAndSwap(restored, 1)).toBe(true);
+    const final = await repository.get(2);
+    expect(final.items).toEqual({ tm: 3 });
+    expect(final.balance).toBe(500);
+    expect(final.revision).toBe(1);
+    expect(final.purchases.map((entry) => entry.status)).toEqual([
+      'applied',
+      'applied',
+      'cancelled',
+    ]);
+    expect((await repository.forAdmin(1))[0].purchases).toEqual(
+      final.purchases,
+    );
+  });
   it('persists a zero-price catalog and its revision using real Mongoose CAS', async () => {
     const catalogFixture = createMongooseShopFixture({
       mongoose,
