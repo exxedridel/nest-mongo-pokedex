@@ -18,6 +18,8 @@ export type ShopCatalog = {
   prices: Record<ShopItemId, number>;
   /** Absent only in catalogues created before global capture difficulty. */
   captureDifficulty?: number;
+  /** Only new player encounters adopt this setting; older catalogues use false. */
+  automaticOpponents?: boolean;
 };
 export type BalanceAdjustment = {
   adjustmentId: string;

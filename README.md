@@ -5,6 +5,23 @@ comunica las instancias React por Socket.IO. `/mensajes-prueba` permite elegir
 cualquier otro usuario registrado y conversar en privado. No hay una lista fija
 de dos correos. Las batallas y la Tienda usan los namespaces descritos abajo.
 
+## Rivales automáticos: namespace `/shop`
+
+React2.10.0 añade el interruptor **Rivales automáticos** en Back office para
+encuentros nuevos del jugador, salvajes y de entrenador. La IA y el motor siguen
+en React; Nest sólo conserva y comunica `ShopCatalog.automaticOpponents`.
+El campo es opcional en documentos anteriores y se publica como `false` si falta.
+
+`shop:opponent-automation-set {requestId,enabled,expectedCatalogRevision}`
+requiere admin vigente y booleano estricto, con CAS e historial idempotente.
+Comparte catálogo, revisión y mutex con precios/dificultad; una edición puede
+exigir recotizar operaciones todavía abiertas. No modifica recibos previos,
+reservas ni batallas activas: cada encuentro conserva su modo al recargar.
+
+Desplegar Nest primero y React después, recargar ambos a2.10.0. Sin variables,
+MySQL, migraciones manuales, seed o reinicio de partidas. Ver
+[OPPONENT_AUTOMATION_PROTOCOL.md](../OPPONENT_AUTOMATION_PROTOCOL.md).
+
 ## Pokebolas: namespace `/shop`
 
 Desde React2.9.0, `shop_catalog.captureDifficulty` es un campo opcional0..20

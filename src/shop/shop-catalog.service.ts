@@ -54,6 +54,7 @@ export class ShopCatalogService implements OnModuleInit {
       revision: row.revision,
       prices: clone(row.prices),
       captureDifficulty: row.captureDifficulty ?? 0,
+      automaticOpponents: row.automaticOpponents ?? false,
     };
   }
   private checkCaptureRevision(actual: number, expected: number) {
@@ -175,6 +176,82 @@ export class ShopCatalogService implements OnModuleInit {
       fail(
         'CATALOG_CONFLICT',
         'Otra operación cambió los precios. Sincroniza y reintenta.',
+      );
+    });
+  }
+  setOpponentAutomation(
+    adminUserId: number,
+    input: any,
+    authorize?: () => Promise<void>,
+  ): Promise<ShopCatalog> {
+    if (
+      !input ||
+      typeof input !== 'object' ||
+      Array.isArray(input) ||
+      Object.keys(input).some(
+        (key) =>
+          !['requestId', 'enabled', 'expectedCatalogRevision'].includes(key),
+      ) ||
+      typeof input.requestId !== 'string' ||
+      !/^[A-Za-z0-9_.:-]{1,128}$/.test(input.requestId) ||
+      typeof input.enabled !== 'boolean' ||
+      !Number.isSafeInteger(input.expectedCatalogRevision) ||
+      input.expectedCatalogRevision < 0
+    )
+      fail(
+        'INVALID_INPUT',
+        'El control automático debe ser activado o desactivado.',
+      );
+    const hash = digest([
+      'opponent-automation',
+      adminUserId,
+      input.enabled,
+      input.expectedCatalogRevision,
+    ]);
+    return this.exclusive(async () => {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const row = await this.record();
+        const prior = row.changes.find(
+          (change) =>
+            change.adminUserId === adminUserId &&
+            change.requestId === input.requestId,
+        );
+        if (prior) {
+          if (prior.requestHash !== hash)
+            fail(
+              'REQUEST_CONFLICT',
+              'La solicitud ya corresponde a otro cambio del catálogo.',
+            );
+          return this.view(row);
+        }
+        if (row.revision !== input.expectedCatalogRevision)
+          fail(
+            'CATALOG_CONFLICT',
+            'La configuración cambió. Actualiza y confirma de nuevo el control automático.',
+          );
+        if (row.changes.length >= 4096)
+          fail(
+            'CATALOG_LIMIT',
+            'Se alcanzó el límite de historial del catálogo de esta versión.',
+          );
+        const previous = row.revision;
+        row.automaticOpponents = input.enabled;
+        row.revision++;
+        row.changes.push({
+          kind: 'opponent-automation',
+          adminUserId,
+          requestId: input.requestId,
+          enabled: input.enabled,
+          requestHash: hash,
+          createdAt: Date.now(),
+        });
+        await authorize?.();
+        if (await this.repository.compareAndSwap(row, previous))
+          return this.view(row);
+      }
+      fail(
+        'CATALOG_CONFLICT',
+        'Otra operación cambió la configuración. Sincroniza y reintenta.',
       );
     });
   }

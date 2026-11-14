@@ -9,10 +9,11 @@ export type ShopCatalogRecord = ShopCatalog & {
   changes: {
     adminUserId: number;
     requestId: string;
-    kind?: 'capture-difficulty';
+    kind?: 'capture-difficulty' | 'opponent-automation';
     itemId?: ShopItemId;
     price?: number;
     modifier?: number;
+    enabled?: boolean;
     requestHash: string;
     createdAt: number;
   }[];
@@ -29,6 +30,7 @@ export const ShopCatalogSchema = new Schema(
     revision: { type: Number, required: true },
     prices: { type: Schema.Types.Mixed, required: true },
     captureDifficulty: { type: Number, default: undefined, min: 0, max: 20 },
+    automaticOpponents: { type: Boolean, default: undefined },
     changes: { type: [Schema.Types.Mixed], required: true },
   },
   {

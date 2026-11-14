@@ -257,6 +257,7 @@ export class ShopGateway
       | 'useCancel'
       | 'priceSet'
       | 'captureDifficultySet'
+      | 'opponentAutomationSet'
       | 'balanceAdjust'
       | 'balanceApplied'
       | 'balanceAbort'
@@ -331,6 +332,12 @@ export class ShopGateway
     @MessageBody() payload: any,
   ) {
     return this.run(socket, 'priceSet', payload);
+  }
+  @SubscribeMessage('shop:opponent-automation-set') opponentAutomationSet(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'opponentAutomationSet', payload);
   }
   @SubscribeMessage('shop:capture-difficulty-set') captureDifficultySet(
     @ConnectedSocket() socket: Socket,

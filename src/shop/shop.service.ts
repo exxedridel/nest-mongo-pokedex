@@ -1260,6 +1260,27 @@ export class ShopService implements OnModuleInit {
     this.activity.changed();
     return this.sync(actor, {});
   }
+  async opponentAutomationSet(actor: Actor, payload: any): Promise<ShopState> {
+    this.admin(actor);
+    await this.catalog.setOpponentAutomation(
+      actor.user.id,
+      payload,
+      async () => {
+        const verified = await this.auth.authenticate(actor.token);
+        this.admin(actor);
+        if (
+          verified.user.id !== actor.user.id ||
+          verified.user.role !== 'admin'
+        )
+          fail(
+            'ADMIN_REQUIRED',
+            'La cuenta ya no puede modificar el control automático de rivales.',
+          );
+      },
+    );
+    this.activity.changed();
+    return this.sync(actor, {});
+  }
   async captureDifficultySet(actor: Actor, payload: any): Promise<ShopState> {
     this.admin(actor);
     await this.catalog.setCaptureDifficulty(

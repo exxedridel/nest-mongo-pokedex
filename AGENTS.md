@@ -9,6 +9,15 @@ Acuerdo del usuario confirmado el 2026-11-08:
 
 Si esta disponible, leer [la memoria compartida](../PROJECT_MEMORY.md). Este resumen se conserva tambien aqui para sesiones que abran solo este repositorio.
 
+Etapa vigente2026-11-14 React2.10.0: shop_catalog.automaticOpponents opcional
+falselegacy; snapshots siempreboolean. shop:opponent-automation-set exigeadmin
+vigente/enabledboolean/expectedCatalogRevision, CAS/journal/replay compartidos
+precios+dificultad. No tocarwallet/receipts/batallas. Sóloconfigglobal; IA/motor
+y modo porencuentronuevo siguenReact.146Shop47PvP/buildPASS, distestable. Ver
+memoria/OPPONENT_AUTOMATION_PROTOCOL para QAfinal. ChromeShopCOMPLETO+autoPASS
+sinJSerrors; no motor/IAservidor ni turnoWSnuevo. Nest→React/recargar2.10.0,
+sinvars/MySQL/migraciónmanual/seed/reset/borrados; producción no verificada.
+
 Etapa vigente2026-11-13 React2.9.0: shop_catalog.captureDifficulty opcional0..20
 (ausente0), admin capture-difficulty-set CAS/journal/revisiónmutexprecios. Ball
 use expectedCaptureRevisionopt enlazahashsufijo+reciptcaptureRevisionopt, sólo

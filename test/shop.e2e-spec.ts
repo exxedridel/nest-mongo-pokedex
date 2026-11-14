@@ -1844,6 +1844,47 @@ describe('Shop Socket.IO authenticated namespace', () => {
     });
     return socket;
   }
+  it('publishes opponent automation to every player through the admin-only event without changing wallets', async () => {
+    const admin = await connect(1),
+      player = await connect(2),
+      other = await connect(3);
+    const observed = [player, other].map(
+      (socket) =>
+        new Promise<any>((resolve) => {
+          const listener = (state: any) => {
+            if (state.catalog?.automaticOpponents === true) {
+              socket.off('shop:state', listener);
+              resolve(state.catalog);
+            }
+          };
+          socket.on('shop:state', listener);
+        }),
+    );
+    const payload = {
+      requestId: 'socket-automation',
+      enabled: true,
+      expectedCatalogRevision: 0,
+    };
+    expect(
+      (await emit(player, 'shop:opponent-automation-set', payload)).error.code,
+    ).toBe('ADMIN_REQUIRED');
+    const result = await emit(admin, 'shop:opponent-automation-set', payload);
+    expect(result.ok).toBe(true);
+    expect(result.catalog.automaticOpponents).toBe(true);
+    for (const catalogue of await Promise.all(observed))
+      expect(catalogue).toEqual(result.catalog);
+    const own = await emit(player, 'shop:sync', {});
+    expect(own.wallet).toMatchObject({ balance: 500, revision: 0, items: {} });
+    const disabled = await emit(admin, 'shop:opponent-automation-set', {
+      requestId: 'socket-manual',
+      enabled: false,
+      expectedCatalogRevision: 1,
+    });
+    expect(disabled.catalog.automaticOpponents).toBe(false);
+    expect((await emit(other, 'shop:sync', {})).catalog).toEqual(
+      disabled.catalog,
+    );
+  });
   it('publishes the global difficulty through the authenticated admin event to every player without changing their wallet', async () => {
     const admin = await connect(1),
       player = await connect(2),
@@ -2167,6 +2208,184 @@ describe('Shop Socket.IO authenticated namespace', () => {
     release();
     expect((await late).reset.status).toBe('cancelled');
     expect((await emit(player, 'shop:sync', {})).wallet.revision).toBe(0);
+  });
+});
+
+describe('Global opponent automation for new player encounters', () => {
+  let auth: ReturnType<typeof fakeAuth>,
+    clients: Record<number, Actor>,
+    repo: MemoryShopRepository,
+    service: ShopService;
+  const setting = (overrides: Record<string, any> = {}) => ({
+    requestId: 'auto-on',
+    enabled: true,
+    expectedCatalogRevision: 0,
+    ...overrides,
+  });
+  beforeEach(async () => {
+    auth = fakeAuth();
+    clients = actors(auth);
+    repo = new MemoryShopRepository();
+    service = new ShopService(repo, auth as any, new PlayerActivityService());
+    await service.onModuleInit();
+    for (const actor of Object.values(clients)) service.connect(actor);
+    await service.presence(clients[2], { ready: true, localBattle: false });
+  });
+  it('defaults legacy catalogues to manual mode, persists on/off across restarts and preserves wallet/prices/difficulty', async () => {
+    const original = await service.catalog.repository.get();
+    const wallet = await repo.get(2);
+    expect(original).not.toHaveProperty('automaticOpponents');
+    expect((await service.sync(clients[2])).catalog.automaticOpponents).toBe(
+      false,
+    );
+    const enabled = await service.opponentAutomationSet(clients[1], setting());
+    expect(enabled.catalog.automaticOpponents).toBe(true);
+    expect(enabled.catalog.prices).toEqual(original.prices);
+    expect(enabled.catalog.captureDifficulty).toBe(0);
+    const restarted = new ShopCatalogService(service.catalog.repository);
+    await restarted.onModuleInit();
+    expect(await restarted.snapshot()).toEqual(enabled.catalog);
+    await service.opponentAutomationSet(
+      clients[1],
+      setting({
+        requestId: 'auto-off',
+        enabled: false,
+        expectedCatalogRevision: 1,
+      }),
+    );
+    expect((await service.sync(clients[3])).catalog.automaticOpponents).toBe(
+      false,
+    );
+    expect((await restarted.snapshot()).automaticOpponents).toBe(false);
+    expect(await repo.get(2)).toEqual(wallet);
+  });
+  it('requires current admin identity, strict booleans and known input fields before any mutation', async () => {
+    const original = await service.catalog.repository.get();
+    await expect(
+      service.opponentAutomationSet(clients[2], setting()),
+    ).rejects.toMatchObject({ code: 'ADMIN_REQUIRED' });
+    for (const enabled of [undefined, null, 0, 1, 'true', 'false', [], {}])
+      await expect(
+        service.opponentAutomationSet(clients[1], setting({ enabled })),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    for (const expectedCatalogRevision of [-1, 0.5, null, '0'])
+      await expect(
+        service.opponentAutomationSet(
+          clients[1],
+          setting({ expectedCatalogRevision }),
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(
+      service.opponentAutomationSet(clients[1], setting({ price: 1 })),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(await service.catalog.repository.get()).toEqual(original);
+    auth.users.get(1).role = 'player';
+    await expect(
+      service.opponentAutomationSet(clients[1], setting()),
+    ).rejects.toMatchObject({ code: 'ADMIN_REQUIRED' });
+    expect(await service.catalog.repository.get()).toEqual(original);
+  });
+  it('deduplicates commands across price/difficulty kinds and rejects stale settings without rewinding newer state', async () => {
+    await service.opponentAutomationSet(clients[1], setting());
+    await service.opponentAutomationSet(clients[1], setting());
+    expect((await service.catalog.repository.get()).changes).toHaveLength(1);
+    await expect(
+      service.opponentAutomationSet(clients[1], setting({ enabled: false })),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await expect(
+      service.priceSet(clients[1], {
+        requestId: 'auto-on',
+        itemId: 'tm',
+        price: 0,
+        expectedCatalogRevision: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await expect(
+      service.captureDifficultySet(clients[1], {
+        requestId: 'auto-on',
+        modifier: 2,
+        expectedCatalogRevision: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await expect(
+      service.opponentAutomationSet(
+        clients[1],
+        setting({ requestId: 'stale' }),
+      ),
+    ).rejects.toMatchObject({ code: 'CATALOG_CONFLICT' });
+    await service.captureDifficultySet(clients[1], {
+      requestId: 'difficulty',
+      modifier: 2,
+      expectedCatalogRevision: 1,
+    });
+    await service.priceSet(clients[1], {
+      requestId: 'price',
+      itemId: 'tm',
+      price: 0,
+      expectedCatalogRevision: 2,
+    });
+    await service.opponentAutomationSet(
+      clients[1],
+      setting({
+        requestId: 'auto-off',
+        enabled: false,
+        expectedCatalogRevision: 3,
+      }),
+    );
+    const replay = await service.opponentAutomationSet(clients[1], setting());
+    expect(replay.catalog).toMatchObject({
+      revision: 4,
+      automaticOpponents: false,
+      captureDifficulty: 2,
+      prices: { tm: 0 },
+    });
+    expect((await service.catalog.repository.get()).changes).toHaveLength(4);
+  });
+  it('revalidates the exact admin connection before commit and never writes a disconnected actor', async () => {
+    const before = await service.catalog.repository.get();
+    const authenticate = auth.authenticate.bind(auth);
+    auth.authenticate = async (token: string) => {
+      const verified = await authenticate(token);
+      service.disconnect(clients[1].socketId);
+      return verified;
+    };
+    await expect(
+      service.opponentAutomationSet(clients[1], setting()),
+    ).rejects.toMatchObject({ code: 'SESSION_CHANGED' });
+    expect(await service.catalog.repository.get()).toEqual(before);
+  });
+  it('preserves committed ball receipts and lets an uncommitted old quote close after the global toggle', async () => {
+    await service.presence(clients[2], { ready: false, localBattle: true });
+    repo.rows.get(2).items['poke-ball'] = 2;
+    const input = {
+      requestId: 'old-ball',
+      captureId: 'own',
+      itemId: 'poke-ball',
+      context: 'local-battle',
+      planHash: 'a'.repeat(64),
+      expectedWalletRevision: 0,
+      expectedCaptureRevision: 0,
+    };
+    const paid = await service.use(clients[2], input);
+    await service.opponentAutomationSet(clients[1], setting());
+    expect((await service.use(clients[2], input)).use).toEqual(paid.use);
+    expect((await repo.get(2)).items['poke-ball']).toBe(1);
+    await service.useApplied(clients[2], {
+      requestId: input.requestId,
+      revision: 1,
+    });
+    const stale = {
+      ...input,
+      requestId: 'stale-ball',
+      expectedWalletRevision: 1,
+    };
+    await expect(service.use(clients[2], stale)).rejects.toMatchObject({
+      code: 'CAPTURE_RULES_CHANGED',
+    });
+    expect((await service.useCancel(clients[2], stale)).use.status).toBe(
+      'cancelled',
+    );
+    expect((await repo.get(2)).items['poke-ball']).toBe(1);
   });
 });
 

@@ -117,6 +117,41 @@ describe('Mongo wallet atomic replacement (real Mongoose, fake driver)', () => {
       await catalogFixture.dispose();
     }
   });
+  it('roundtrips an optional opponent-automation flag and journal without rewriting legacy catalogues', async () => {
+    const catalogFixture = createMongooseShopFixture({
+      mongoose,
+      schema: ShopCatalogSchema,
+    });
+    try {
+      const repository = new MongoShopCatalogRepository(catalogFixture.model);
+      const legacy = { revision: 0, prices: { ...SHOP_CATALOG }, changes: [] };
+      await repository.insert(legacy);
+      expect(await repository.get()).toEqual(legacy);
+      const enabled = {
+        ...legacy,
+        revision: 1,
+        automaticOpponents: true,
+        changes: [
+          {
+            kind: 'opponent-automation' as const,
+            adminUserId: 1,
+            requestId: 'auto-on',
+            enabled: true,
+            requestHash: 'hash',
+            createdAt: 123,
+          },
+        ],
+      };
+      expect(await repository.compareAndSwap(enabled, 0)).toBe(true);
+      expect(await repository.get()).toEqual(enabled);
+      const disabled = { ...enabled, revision: 2, automaticOpponents: false };
+      expect(await repository.compareAndSwap(disabled, 1)).toBe(true);
+      expect((await repository.get()).automaticOpponents).toBe(false);
+      expect(await repository.compareAndSwap(enabled, 1)).toBe(false);
+    } finally {
+      await catalogFixture.dispose();
+    }
+  });
   it('persists Center pending/applied/cancelled metadata without changing wallet revision, stock or cash', async () => {
     const row = wallet();
     row.centerRevision = 1;
