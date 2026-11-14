@@ -85,6 +85,38 @@ describe('Mongo wallet atomic replacement (real Mongoose, fake driver)', () => {
     expect(await repository.compareAndSwap(restored, 1)).toBe(true);
     expect((await repository.get(2)).adjustments[0].status).toBe('applied');
   });
+  it('roundtrips optional capture difficulty and its journal while preserving a legacy catalogue', async () => {
+    const catalogFixture = createMongooseShopFixture({
+      mongoose,
+      schema: ShopCatalogSchema,
+    });
+    try {
+      const repository = new MongoShopCatalogRepository(catalogFixture.model);
+      const legacy = { revision: 0, prices: { ...SHOP_CATALOG }, changes: [] };
+      await repository.insert(legacy);
+      expect(await repository.get()).toEqual(legacy);
+      const updated = {
+        ...legacy,
+        revision: 1,
+        captureDifficulty: 2,
+        changes: [
+          {
+            kind: 'capture-difficulty' as const,
+            adminUserId: 1,
+            requestId: 'difficulty',
+            modifier: 2,
+            requestHash: 'hash',
+            createdAt: 123,
+          },
+        ],
+      };
+      expect(await repository.compareAndSwap(updated, 0)).toBe(true);
+      expect(await repository.get()).toEqual(updated);
+      expect(await repository.compareAndSwap(legacy, 0)).toBe(false);
+    } finally {
+      await catalogFixture.dispose();
+    }
+  });
   it('persists Center pending/applied/cancelled metadata without changing wallet revision, stock or cash', async () => {
     const row = wallet();
     row.centerRevision = 1;

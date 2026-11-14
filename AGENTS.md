@@ -9,6 +9,16 @@ Acuerdo del usuario confirmado el 2026-11-08:
 
 Si esta disponible, leer [la memoria compartida](../PROJECT_MEMORY.md). Este resumen se conserva tambien aqui para sesiones que abran solo este repositorio.
 
+Etapa vigente2026-11-13 React2.9.0: shop_catalog.captureDifficulty opcional0..20
+(ausente0), admin capture-difficulty-set CAS/journal/revisiónmutexprecios. Ball
+use expectedCaptureRevisionopt enlazahashsufijo+reciptcaptureRevisionopt, sólo
+bolas. Queryreplayantesreglas; legacyrecibos/planes/hashintactos. Nuevalegacysin
+revisión sólo dificultad0. Capturerev recheckdentro mutexCASwalletfinal; stale
+nospend. Cancelprevio no revalidacatvigente ycierretombstonepersistido. 139Shop/
+47PvP/buildpasan diststable; ChromeCapture/Shopcompleto/Center/dificultad aprobados.
+Vermemoria/protocolo; Nest→React
+2.9.0 sinvars/MySQL/seed/reset/borrados, campoMongo aditivo sinmigraciónmanual.
+
 Etapa vigente2026-11-13 React2.8.0: BALL_ITEM_IDS Poké/Great/Ultra amplíaUSABLE,
 CONSUMABLE permanece3 (noadminballs). shop:use bolasexige local-battle/sinmoveId;
 debita1+reciboCAS, retryidempotente, postcommitcancelnorefund. Huellas antiguas,

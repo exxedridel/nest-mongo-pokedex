@@ -7,6 +7,20 @@ de dos correos. Las batallas y la Tienda usan los namespaces descritos abajo.
 
 ## Pokebolas: namespace `/shop`
 
+Desde React2.9.0, `shop_catalog.captureDifficulty` es un campo opcional0..20
+(ausente equivale a0). El admin usa `shop:capture-difficulty-set
+{requestId,modifier,expectedCatalogRevision}` con autenticación vigente,
+CAS e historial idempotente. Comparte revisión/mutex con los precios.
+
+Los nuevos lanzamientos incluyen `expectedCaptureRevision`; la revisión se
+comprueba también dentro del mutex que protege el CAS final de la wallet.
+Si cambia antes del cobro, CAPTURE_RULES_CHANGED rechaza sin consumir. El recibo
+añade `captureRevision` sólo a esos lanzamientos. Huellas/recibos anteriores
+mantienen su forma y recuperan aunque cambie la dificultad; un lanzamiento nuevo
+de un cliente antiguo sólo se admite con dificultad0. Cancelaciones previas al
+cobro no dependen de la revisión viva y nunca devuelven una bola ya consumida.
+No hay migración manual, variables o cambios MySQL; desplegar Nest primero.
+
 React2.8.0 habilita `poke-ball`, `great-ball` y `ultra-ball` mediante los eventos
 existentes `shop:use`, `shop:use-applied` y `shop:use-cancel`. Exigen contexto
 `local-battle` y no admiten moveId. Débito1+recibo se guardan juntos; reintentos

@@ -16,6 +16,8 @@ export const MAX_SHOP_PRICE = Math.floor(Number.MAX_SAFE_INTEGER / 99);
 export type ShopCatalog = {
   revision: number;
   prices: Record<ShopItemId, number>;
+  /** Absent only in catalogues created before global capture difficulty. */
+  captureDifficulty?: number;
 };
 export type BalanceAdjustment = {
   adjustmentId: string;
@@ -126,6 +128,8 @@ export type ItemUse = {
   context: 'party' | 'local-battle';
   planHash: string;
   expectedWalletRevision: number;
+  /** Present only for throws confirmed against a versioned capture quote. */
+  captureRevision?: number;
   walletRevision: number;
   status: 'pending' | 'applied' | 'cancelled';
 };

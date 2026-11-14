@@ -1844,6 +1844,38 @@ describe('Shop Socket.IO authenticated namespace', () => {
     });
     return socket;
   }
+  it('publishes the global difficulty through the authenticated admin event to every player without changing their wallet', async () => {
+    const admin = await connect(1),
+      player = await connect(2),
+      other = await connect(3);
+    const published = new Promise<any>((resolve) => {
+      const listener = (state: any) => {
+        if (state.catalog?.captureDifficulty === 2) {
+          player.off('shop:state', listener);
+          resolve(state.catalog);
+        }
+      };
+      player.on('shop:state', listener);
+    });
+    const payload = {
+      requestId: 'socket-difficulty',
+      modifier: 2,
+      expectedCatalogRevision: 0,
+    };
+    expect(
+      (await emit(player, 'shop:capture-difficulty-set', payload)).error.code,
+    ).toBe('ADMIN_REQUIRED');
+    const changed = await emit(admin, 'shop:capture-difficulty-set', payload);
+    expect(changed.ok).toBe(true);
+    expect(changed.catalog.captureDifficulty).toBe(2);
+    expect(await published).toEqual(changed.catalog);
+    expect((await emit(other, 'shop:sync', {})).catalog).toEqual(
+      changed.catalog,
+    );
+    const own = await emit(player, 'shop:sync', {});
+    expect(own.wallet.balance).toBe(500);
+    expect(own.wallet.revision).toBe(0);
+  });
   it('rejects legacy balance clients and exposes an authenticated abort event with durable cancellation', async () => {
     const admin = await connect(1),
       player = await connect(2),
@@ -2135,5 +2167,256 @@ describe('Shop Socket.IO authenticated namespace', () => {
     release();
     expect((await late).reset.status).toBe('cancelled');
     expect((await emit(player, 'shop:sync', {})).wallet.revision).toBe(0);
+  });
+});
+
+describe('Global capture difficulty and paid-throw quote fencing', () => {
+  let auth: ReturnType<typeof fakeAuth>,
+    clients: Record<number, Actor>,
+    repo: MemoryShopRepository,
+    activity: PlayerActivityService,
+    service: ShopService;
+  const setting = (overrides: Record<string, any> = {}) => ({
+    requestId: 'difficulty-1',
+    modifier: 2,
+    expectedCatalogRevision: 0,
+    ...overrides,
+  });
+  const throwInput = (overrides: Record<string, any> = {}) => ({
+    requestId: 'difficulty-ball',
+    captureId: 'capture-own',
+    context: 'local-battle',
+    planHash: 'a'.repeat(64),
+    expectedWalletRevision: 0,
+    itemId: 'poke-ball',
+    expectedCaptureRevision: 0,
+    ...overrides,
+  });
+  beforeEach(async () => {
+    auth = fakeAuth();
+    clients = actors(auth);
+    repo = new MemoryShopRepository();
+    activity = new PlayerActivityService();
+    service = new ShopService(repo, auth as any, activity);
+    await service.onModuleInit();
+    for (const actor of Object.values(clients)) service.connect(actor);
+    await service.presence(clients[2], { ready: false, localBattle: true });
+    repo.rows.get(2).items['poke-ball'] = 2;
+    repo.rows.get(2).items['full-restore'] = 1;
+  });
+  it('defaults legacy catalogues to zero without resetting prices and persists a global difficulty across restart', async () => {
+    const legacy = await service.catalog.repository.get();
+    expect(legacy).not.toHaveProperty('captureDifficulty');
+    expect((await service.sync(clients[2])).catalog.captureDifficulty).toBe(0);
+    const beforeWallet = await repo.get(2);
+    await service.captureDifficultySet(clients[1], setting());
+    const changed = await service.catalog.snapshot();
+    expect(changed.captureDifficulty).toBe(2);
+    expect(changed.prices).toEqual(legacy.prices);
+    expect((await service.sync(clients[3])).catalog).toEqual(changed);
+    const restarted = new ShopCatalogService(service.catalog.repository);
+    await restarted.onModuleInit();
+    expect(await restarted.snapshot()).toEqual(changed);
+    expect(await repo.get(2)).toEqual(beforeWallet);
+    await service.catalog.setPrice(1, {
+      requestId: 'price',
+      itemId: 'tm',
+      price: 0,
+      expectedCatalogRevision: 1,
+    });
+    expect((await service.catalog.snapshot()).captureDifficulty).toBe(2);
+  });
+  it('requires an admin, integers0..20 and a fresh revision and deduplicates setting commands across operation kinds', async () => {
+    await expect(
+      service.captureDifficultySet(clients[2], setting()),
+    ).rejects.toMatchObject({ code: 'ADMIN_REQUIRED' });
+    for (const modifier of [-1, 21, 0.5, null, '2', NaN, Infinity])
+      await expect(
+        service.captureDifficultySet(clients[1], setting({ modifier })),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await service.captureDifficultySet(clients[1], setting());
+    await service.captureDifficultySet(clients[1], setting());
+    expect((await service.catalog.repository.get()).changes).toHaveLength(1);
+    await expect(
+      service.captureDifficultySet(clients[1], setting({ modifier: 3 })),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await expect(
+      service.priceSet(clients[1], {
+        requestId: 'difficulty-1',
+        itemId: 'tm',
+        price: 0,
+        expectedCatalogRevision: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await expect(
+      service.captureDifficultySet(clients[1], setting({ requestId: 'stale' })),
+    ).rejects.toMatchObject({ code: 'CAPTURE_RULES_CHANGED' });
+    await service.captureDifficultySet(
+      clients[1],
+      setting({
+        requestId: 'maximum',
+        modifier: 20,
+        expectedCatalogRevision: 1,
+      }),
+    );
+    await service.captureDifficultySet(
+      clients[1],
+      setting({ requestId: 'normal', modifier: 0, expectedCatalogRevision: 2 }),
+    );
+    expect((await service.catalog.snapshot()).captureDifficulty).toBe(0);
+  });
+  it('revalidates the administrator before committing difficulty and leaves the catalogue unchanged after revocation', async () => {
+    const before = await service.catalog.snapshot();
+    auth.users.get(1).role = 'player';
+    await expect(
+      service.captureDifficultySet(clients[1], setting()),
+    ).rejects.toMatchObject({ code: 'ADMIN_REQUIRED' });
+    expect(await service.catalog.snapshot()).toEqual(before);
+  });
+  it('allows legacy throws with normal difficulty after price changes, but rejects fresh legacy throws once difficulty is nonzero', async () => {
+    await service.priceSet(clients[1], {
+      requestId: 'price',
+      itemId: 'tm',
+      price: 0,
+      expectedCatalogRevision: 0,
+    });
+    const legacy = throwInput();
+    delete legacy.expectedCaptureRevision;
+    const used = await service.use(clients[2], legacy);
+    expect(used.use).not.toHaveProperty('captureRevision');
+    await service.captureDifficultySet(
+      clients[1],
+      setting({ expectedCatalogRevision: 1 }),
+    );
+    await expect(
+      service.use(clients[2], { ...legacy, expectedCaptureRevision: 2 }),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    expect((await service.use(clients[2], legacy)).use.status).toBe('pending');
+    await service.useApplied(clients[2], {
+      requestId: legacy.requestId,
+      revision: 1,
+    });
+    expect((await service.use(clients[2], legacy)).use.status).toBe('applied');
+    await expect(
+      service.use(clients[2], {
+        ...legacy,
+        requestId: 'old-second',
+        expectedWalletRevision: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'PLAYER_UPDATE_REQUIRED' });
+    expect((await repo.get(2)).items['poke-ball']).toBe(1);
+    expect((await repo.get(2)).uses).toHaveLength(1);
+  });
+  it('binds a new paid throw to its confirmed capture revision and keeps that receipt after live settings change', async () => {
+    await service.captureDifficultySet(clients[1], setting());
+    const request = throwInput({ expectedCaptureRevision: 1 });
+    const used = await service.use(clients[2], request);
+    expect(used.use).toMatchObject({
+      captureRevision: 1,
+      walletRevision: 1,
+      status: 'pending',
+    });
+    const original = clone((await repo.get(2)).uses[0]);
+    await service.captureDifficultySet(
+      clients[1],
+      setting({ requestId: 'harder', modifier: 3, expectedCatalogRevision: 1 }),
+    );
+    expect((await service.use(clients[2], request)).use).toEqual(used.use);
+    expect((await repo.get(2)).uses[0]).toEqual(original);
+    await expect(
+      service.use(clients[2], { ...request, expectedCaptureRevision: 2 }),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await service.useApplied(clients[2], {
+      requestId: request.requestId,
+      revision: 1,
+    });
+    await expect(
+      service.use(clients[2], {
+        ...request,
+        requestId: 'new-stale',
+        expectedWalletRevision: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'CAPTURE_RULES_CHANGED' });
+    expect((await repo.get(2)).items['poke-ball']).toBe(1);
+  });
+  it('fences a difficulty update completed during player authentication before the final inventory CAS', async () => {
+    const original = auth.authenticate.bind(auth);
+    let once = true;
+    auth.authenticate = async (token) => {
+      const identity = await original(token);
+      if (token === 'shop-user-2' && once) {
+        once = false;
+        await service.catalog.setCaptureDifficulty(1, setting());
+      }
+      return identity;
+    };
+    await expect(service.use(clients[2], throwInput())).rejects.toMatchObject({
+      code: 'CAPTURE_RULES_CHANGED',
+    });
+    expect((await repo.get(2)).revision).toBe(0);
+    expect((await repo.get(2)).items['poke-ball']).toBe(2);
+    expect((await repo.get(2)).uses ?? []).toEqual([]);
+  });
+  it('holds the catalogue mutex across the final wallet write so settings cannot overtake a committed throw', async () => {
+    const original = repo.compareAndSwap.bind(repo);
+    let entered: () => void, release: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    repo.compareAndSwap = async (...args) => {
+      entered();
+      await gate;
+      return original(...args);
+    };
+    const use = service.use(clients[2], throwInput());
+    await started;
+    let difficultySaved = false;
+    const change = service.catalog
+      .setCaptureDifficulty(1, setting())
+      .then(() => {
+        difficultySaved = true;
+      });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(difficultySaved).toBe(false);
+    release();
+    expect((await use).use.captureRevision).toBe(0);
+    await change;
+    expect((await service.catalog.snapshot()).captureDifficulty).toBe(2);
+    expect((await repo.get(2)).items['poke-ball']).toBe(1);
+  });
+  it('permits a stale uncommitted quote to be cancelled durably without consulting or reverting live capture settings', async () => {
+    await service.captureDifficultySet(clients[1], setting());
+    const stale = throwInput();
+    const cancelled = await service.useCancel(clients[2], stale);
+    expect(cancelled.use).toMatchObject({
+      status: 'cancelled',
+      captureRevision: 0,
+    });
+    expect((await service.use(clients[2], stale)).use.status).toBe('cancelled');
+    expect((await repo.get(2)).items['poke-ball']).toBe(2);
+    expect((await service.catalog.snapshot()).captureDifficulty).toBe(2);
+  });
+  it('rejects malformed capture revisions and any revision on non-ball items without debiting', async () => {
+    for (const expectedCaptureRevision of [-1, 0.5, null, '0', NaN])
+      await expect(
+        service.use(clients[2], throwInput({ expectedCaptureRevision })),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    for (const itemId of ['full-restore', 'max-ether', 'max-elixir', 'tm'])
+      await expect(
+        service.use(
+          clients[2],
+          throwInput({
+            itemId,
+            context: 'party',
+            ...(itemId === 'max-ether' || itemId === 'tm'
+              ? { moveId: 33 }
+              : {}),
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect((await repo.get(2)).revision).toBe(0);
   });
 });

@@ -1260,6 +1260,27 @@ export class ShopService implements OnModuleInit {
     this.activity.changed();
     return this.sync(actor, {});
   }
+  async captureDifficultySet(actor: Actor, payload: any): Promise<ShopState> {
+    this.admin(actor);
+    await this.catalog.setCaptureDifficulty(
+      actor.user.id,
+      payload,
+      async () => {
+        const verified = await this.auth.authenticate(actor.token);
+        this.admin(actor);
+        if (
+          verified.user.id !== actor.user.id ||
+          verified.user.role !== 'admin'
+        )
+          fail(
+            'ADMIN_REQUIRED',
+            'La cuenta ya no puede modificar la dificultad de captura.',
+          );
+      },
+    );
+    this.activity.changed();
+    return this.sync(actor, {});
+  }
   async balanceAdjust(actor: Actor, payload: any): Promise<ShopState> {
     this.admin(actor);
     object(payload, [
@@ -1698,6 +1719,7 @@ export class ShopService implements OnModuleInit {
       'expectedWalletRevision',
       'itemId',
       'moveId',
+      'expectedCaptureRevision',
     ]);
     id(payload.requestId);
     id(payload.captureId);
@@ -1723,6 +1745,14 @@ export class ShopService implements OnModuleInit {
         'PLAYER_IN_BATTLE',
         'Las pokebolas sólo se pueden lanzar en un encuentro salvaje local.',
       );
+    if (payload.expectedCaptureRevision !== undefined) {
+      if (!BALL_ITEM_IDS.includes(itemId))
+        fail(
+          'INVALID_INPUT',
+          'Sólo una pokebola puede confirmar una revisión de captura.',
+        );
+      integer(payload.expectedCaptureRevision);
+    }
     this.self(actor);
     if (actor.user.role !== 'player')
       fail(
@@ -1739,6 +1769,8 @@ export class ShopService implements OnModuleInit {
     ];
     // Keep the exact original Full Restore fingerprint for pending legacy uses.
     if (itemId !== 'full-restore') content.push(itemId, payload.moveId ?? null);
+    if (payload.expectedCaptureRevision !== undefined)
+      content.push('capture-settings', payload.expectedCaptureRevision);
     return digest(content);
   }
   private itemUseOwner(actor: Actor, context: ItemUse['context']) {
@@ -1790,6 +1822,9 @@ export class ShopService implements OnModuleInit {
           }
           await this.activity.assertAvailable([actor.user.id]);
           this.itemUseOwner(actor, payload.context);
+          const captureQuote = BALL_ITEM_IDS.includes(itemId as any)
+            ? await this.catalog.captureQuote(payload.expectedCaptureRevision)
+            : undefined;
           if (row.revision !== payload.expectedWalletRevision)
             fail(
               'WALLET_CONFLICT',
@@ -1821,6 +1856,9 @@ export class ShopService implements OnModuleInit {
             context: payload.context,
             planHash: payload.planHash,
             expectedWalletRevision: payload.expectedWalletRevision,
+            ...(payload.expectedCaptureRevision === undefined
+              ? {}
+              : { captureRevision: payload.expectedCaptureRevision }),
             walletRevision: row.revision + 1,
             status: 'pending',
           };
@@ -1828,7 +1866,12 @@ export class ShopService implements OnModuleInit {
           row.revision++;
           row.storageRevision++;
           (row.uses ??= []).push({ ...receipt, requestHash });
-          if (!(await this.repository.compareAndSwap(row, previous))) continue;
+          const committed = captureQuote
+            ? await this.catalog.commitCapture(captureQuote.revision, () =>
+                this.repository.compareAndSwap(row, previous),
+              )
+            : await this.repository.compareAndSwap(row, previous);
+          if (!committed) continue;
           this.activity.changed();
           return receipt;
         }
@@ -1890,6 +1933,9 @@ export class ShopService implements OnModuleInit {
             context: payload.context,
             planHash: payload.planHash,
             expectedWalletRevision: payload.expectedWalletRevision,
+            ...(payload.expectedCaptureRevision === undefined
+              ? {}
+              : { captureRevision: payload.expectedCaptureRevision }),
             walletRevision: row.revision,
             status: 'cancelled',
           };
