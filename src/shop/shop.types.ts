@@ -1,5 +1,6 @@
 import { Actor } from '../pvp/pvp.types';
 import { UserPublic } from '../messages/messages.types';
+import type { CombatReward, StoredCombatReward } from './combat-rewards';
 
 export const SHOP_CATALOG = {
   'poke-ball': 150,
@@ -120,6 +121,8 @@ export type Wallet = {
   items: Partial<Record<ShopItemId, number>>;
   currencyVersion: 1;
   consumptionAck?: ConsumptionAck;
+  /** Missing only on snapshots predating automatic combat rewards. */
+  rewardEpoch?: number;
 };
 export type Purchase = {
   /** Absent for purchases, including genuine purchases priced at zero. */
@@ -185,6 +188,7 @@ export type WalletRecord = Omit<Wallet, 'consumptionAck'> & {
     itemId?: ConsumableItemId;
     moveId?: number;
   }[];
+  rewards?: StoredCombatReward[];
 };
 export type ShopActor = Actor & {
   ready: boolean;
@@ -214,6 +218,7 @@ export type ShopPlayer = {
   pendingConsumption?: boolean;
 };
 export type ShopState = {
+  rewards?: CombatReward[];
   consumptions?: ConsumptionResult[];
   catalog?: ShopCatalog;
   adjustment?: BalanceAdjustment;
@@ -257,6 +262,7 @@ export function walletView(record: WalletRecord, clientId?: string): Wallet {
     }));
   return clone({
     userId: record.userId,
+    rewardEpoch: record.rewardEpoch ?? 0,
     balance: record.balance,
     revision: record.revision,
     items: record.items,

@@ -85,6 +85,60 @@ describe('Mongo PvP serialization and recovery (real Mongoose, fake driver)', ()
     repository = new MongoPvpRepository(fixture.model);
   });
   afterEach(() => fixture.dispose());
+  it('round-trips reward checkpoints, deferred levels and the durable payout outbox', async () => {
+    const input = battle();
+    input.session.rewards = {
+      version: 1,
+      defeats: [
+        {
+          id: 'ko',
+          winnerSide: 'a',
+          winnerCaptureId: 'first',
+          defeatedSide: 'b',
+          defeatedCaptureId: 'other',
+          winnerLevel: 20,
+          defeatedLevel: 25,
+          levels: 2,
+        },
+      ],
+    };
+    input.pendingRewards = [
+      {
+        userId: 2,
+        battleId: input.battleId,
+        presetId: 'kanto-brock',
+        epoch: 0,
+      },
+    ];
+    input.results = {
+      a: {
+        battleId: input.battleId,
+        resultId: 'result',
+        userId: 2,
+        snapshotId: 'snapshot-a',
+        baseHash: 'original-hash',
+        outcome: 'win',
+        patches: [
+          {
+            captureId: 'first',
+            level: 22,
+            hp: 19,
+            statuses: [],
+            statusTurns: {},
+          },
+        ],
+      },
+    };
+    await repository.insert(input);
+    const read = await repository.get(input.battleId);
+    expect(read.pendingRewards).toEqual(input.pendingRewards);
+    expect(read.session.rewards).toEqual(input.session.rewards);
+    expect(read.results).toEqual(input.results);
+    read.revision++;
+    read.pendingRewards = [];
+    expect(await repository.compareAndSwap(read, 4)).toBe(true);
+    expect((await repository.get(input.battleId)).pendingRewards).toEqual([]);
+  });
 
   it('round-trips zero PP, per-item budgets and the item-bound recovery outbox', async () => {
     const input = battle();

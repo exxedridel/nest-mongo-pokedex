@@ -5,6 +5,26 @@ comunica las instancias React por Socket.IO. `/mensajes-prueba` permite elegir
 cualquier otro usuario registrado y conversar en privado. No hay una lista fija
 de dos correos. Las batallas y la Tienda usan los namespaces descritos abajo.
 
+## Recompensas automáticas de combate
+
+React2.13.0 registra niveles por KO/captura y los aplica al guardar el resultado.
+La sesión administrativa añade un ledger opcional de derrotas; Nest valida los
+checkpoints y genera nivel/HP final en los patches, conservando resultados legacy.
+El motor permanece en React.
+
+`shop:reward-claim {rewards:[{encounterId,epoch,color}]}` acredita premios de
+Trainer local: rosa200, verde300, azul400, amarilla500 y roja600PD; dorada0.
+El importe se calcula aquí. El ledger de cartera guarda crédito+recibo en un CAS,
+deduplicado por cuenta/encuentro. El jugador reintenta sin bloquear el juego.
+Los premios administrativos de los presets Kanto nacen del resultado guardado
+y usan un outbox recuperable por battleId. JcJ, huida, rendición y empate no pagan.
+
+`Wallet.rewardEpoch` opcional en documentos anteriores parte de0 y sube al
+reiniciar. Premios de generaciones anteriores terminan con STALE_GAME sin cobro.
+No se borran carteras, partidas ni recibos. Ver
+[BATTLE_REWARDS_PROTOCOL.md](../BATTLE_REWARDS_PROTOCOL.md).
+Desplegar Nest antes de React y recargar a2.13.0; sin nuevas variables ni MySQL.
+
 ## Consumo en segundo plano: namespace `/shop`
 
 React2.12.0 aplica los objetos del frontend del jugador localmente y envía

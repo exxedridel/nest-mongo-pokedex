@@ -22,6 +22,7 @@ import {
   requestKey,
   stableJson,
   validateSnapshot,
+  validateSession,
 } from '../src/pvp/pvp.validation';
 
 function fakeAuth() {
@@ -226,6 +227,206 @@ describe('Durable PvP service, repository and private projection', () => {
       processedCommandIds: [],
     });
   }
+  async function rewardBattle(trainer = true, winnerLevel = 20) {
+    const activity = new PlayerActivityService();
+    const wallets = new MemoryShopRepository();
+    const shop = new ShopService(wallets, auth as any, activity);
+    await shop.onModuleInit();
+    service = new PvpService(repo, auth as any, activity, shop);
+    await service.onModuleInit();
+    for (const actor of Object.values(actors)) {
+      service.connect(actor);
+      shop.connect(actor);
+    }
+    for (const userId of [2, 3])
+      await shop.presence(actors[userId], { ready: true, localBattle: false });
+    const readyBattle = trainer ? await readyTrainer() : await ready();
+    if (winnerLevel !== 20) {
+      const mon = readyBattle.players.a.snapshot.pokemons[0];
+      mon.pokemon.level = winnerLevel;
+      mon.pokemon.stats = mon.pokemon.baseStats.map((stat: any) => ({
+        name: stat.name,
+        value:
+          stat.name === 'hp'
+            ? Math.floor(
+                (Math.floor((stat.value * winnerLevel) / 50) +
+                  winnerLevel +
+                  10) *
+                  1.3,
+              )
+            : Math.floor((stat.value * winnerLevel) / 50) + 5,
+      }));
+      readyBattle.players.a.snapshot.baseHash = digest(
+        readyBattle.players.a.snapshot.pokemons,
+      );
+      const previous = readyBattle.revision++;
+      await repo.compareAndSwap(readyBattle, previous);
+    }
+    const initial = session(readyBattle);
+    initial.rewards = { version: 1, defeats: [] };
+    let battle = await service.checkpoint(actors[1], {
+      battleId: readyBattle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 0,
+      session: initial,
+      processedCommandIds: [],
+    });
+    const finished = clone(battle.session);
+    finished.phase = 'finished';
+    finished.runtime.serial++;
+    finished.runtime.ended = true;
+    finished.runtime.winner = 'a';
+    const winner = finished.teams.a.pokemons[0];
+    for (const [index, defeated] of finished.teams.b.pokemons.entries()) {
+      defeated.pokemon.stats.find((stat: any) => stat.name === 'hp').value = 0;
+      finished.rewards.defeats.push({
+        id: `${battle.battleId}:1:ko:${index}`,
+        winnerSide: 'a',
+        winnerCaptureId: winner.captureId,
+        defeatedSide: 'b',
+        defeatedCaptureId: defeated.captureId,
+        winnerLevel: winner.pokemon.level,
+        defeatedLevel: defeated.pokemon.level,
+        levels: defeated.pokemon.level > winner.pokemon.level ? 2 : 1,
+      });
+    }
+    battle = await service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 1,
+      session: finished,
+      processedCommandIds: [],
+    });
+    return { battle, shop, wallets };
+  }
+  it('awards deferred levels with proportional HP and pays the winning Trainer preset exactly once', async () => {
+    const { battle, wallets } = await rewardBattle();
+    expect(battle.session.teams.a.pokemons[0].pokemon.level).toBe(20);
+    const done = await service.finalize(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+    });
+    expect(done.results.a.patches[0]).toMatchObject({
+      level: 22,
+      hp: 75,
+      statuses: ['burned'],
+    });
+    expect((await wallets.get(2)).balance).toBe(1700);
+    expect(done.pendingRewards).toEqual([]);
+    const again = await service.finalize(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+    });
+    expect(again.results).toEqual(done.results);
+    expect((await wallets.get(2)).rewards).toHaveLength(1);
+  });
+  it.each([
+    [5, 9],
+    [99, 100],
+  ])(
+    'sums higher-level knockouts and caps progression: level %s becomes %s',
+    async (initial, expected) => {
+      const { battle } = await rewardBattle(true, initial);
+      const done = await service.finalize(actors[1], {
+        battleId: battle.battleId,
+        hostEpoch: 1,
+      });
+      expect(done.results.a.patches[0].level).toBe(expected);
+      expect(done.results.a.patches[0].statuses).toEqual(['burned']);
+    },
+  );
+  it('does not mint cash for a forfeit, a draw or an existing legacy finished session', async () => {
+    for (const outcome of ['forfeit', 'draw', 'legacy']) {
+      repo = new MemoryPvpRepository();
+      const { battle, wallets } = await rewardBattle();
+      const before = await repo.get(battle.battleId);
+      if (outcome === 'forfeit') {
+        before.session.teams.b.pokemons[0].pokemon.stats.find(
+          (stat: any) => stat.name === 'hp',
+        ).value = 1;
+        before.session.rewards.defeats = [];
+      } else if (outcome === 'draw') before.session.runtime.winner = 'draw';
+      else delete before.session.rewards;
+      const previous = before.revision++;
+      await repo.compareAndSwap(before, previous);
+      await service.finalize(actors[1], {
+        battleId: battle.battleId,
+        hostEpoch: 1,
+      });
+      expect((await wallets.get(2)).balance).toBe(500);
+      expect((await wallets.get(2)).rewards).toBeUndefined();
+    }
+  });
+  it('recovers a durable finalized reward after a credit response is lost without paying again', async () => {
+    const { battle, shop, wallets } = await rewardBattle();
+    const credit = shop.creditBattleReward.bind(shop);
+    jest
+      .spyOn(shop, 'creditBattleReward')
+      .mockImplementationOnce(async (...args) => {
+        await credit(...args);
+        throw new Error('lost reward response');
+      });
+    await expect(
+      service.finalize(actors[1], { battleId: battle.battleId, hostEpoch: 1 }),
+    ).rejects.toThrow('lost reward response');
+    const pending = await repo.get(battle.battleId);
+    expect(pending.phase).toBe('finalizing');
+    expect(pending.pendingRewards).toHaveLength(1);
+    expect(pending.lockHeld).toBe(true);
+    const restored = await service.sync(actors[1], {
+      battleId: battle.battleId,
+    });
+    expect(restored.state.phase).toBe('finalizing');
+    expect((await repo.get(battle.battleId)).pendingRewards).toEqual([]);
+    expect((await wallets.get(2)).balance).toBe(1700);
+    expect((await wallets.get(2)).rewards).toHaveLength(1);
+  });
+  it('awards player-vs-player levels but never money', async () => {
+    const { battle, wallets } = await rewardBattle(false);
+    const done = await service.finalize(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+    });
+    expect(done.results.a.patches[0].level).toBe(21);
+    expect(done.results.b.patches[0]).not.toHaveProperty('level');
+    expect((await wallets.get(2)).balance).toBe(500);
+    expect((await wallets.get(3)).balance).toBe(500);
+    expect(done.pendingRewards).toBeUndefined();
+  });
+  it('rejects forged, repeated and rolled-back knockout rewards while retaining the battle reservation', async () => {
+    const { battle } = await rewardBattle(false);
+    for (const mutation of [
+      (next: any) => {
+        next.rewards.defeats = [];
+      },
+      (next: any) => {
+        delete next.rewards;
+      },
+      (next: any) => {
+        next.rewards.defeats[0].levels = 2;
+      },
+      (next: any) => {
+        next.rewards.defeats.push({
+          ...next.rewards.defeats[0],
+          id: 'forged-additional-ko',
+        });
+      },
+    ]) {
+      const next = clone(battle.session);
+      mutation(next);
+      expect(() => validateSession(next, battle)).toThrow();
+    }
+    expect((await repo.get(battle.battleId)).lockHeld).toBe(true);
+  });
+  it('accepts long historical knockout ledgers after repeated revivals without lowering the frontend limit', async () => {
+    const { battle } = await rewardBattle(false);
+    const entry = battle.session.rewards.defeats[0];
+    battle.session.rewards.defeats = Array.from(
+      { length: 600 },
+      (_, index) => ({ ...entry, id: `historical-ko-${index}` }),
+    );
+    expect(() => validateSession(clone(battle.session), battle)).not.toThrow();
+  });
   it('declares unique partial reservation indexes for players and administrator', () => {
     const indexes = PvpBattleSchema.indexes();
     expect(indexes).toEqual(

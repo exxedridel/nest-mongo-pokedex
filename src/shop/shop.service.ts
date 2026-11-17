@@ -8,6 +8,12 @@ import { SHOP_REPOSITORY, ShopRepository } from './shop.repository';
 import { ShopCatalogService } from './shop-catalog.service';
 import { MemoryShopCatalogRepository } from './shop-catalog.repository';
 import {
+  CombatReward,
+  LOCAL_TRAINER_REWARDS,
+  LocalTrainerRewardClaim,
+  trainerPresetReward,
+} from './combat-rewards';
+import {
   clone,
   BALL_ITEM_IDS,
   BalanceAdjustment,
@@ -420,6 +426,9 @@ export class ShopService implements OnModuleInit {
             }
           : {}),
         wallet: walletView(row, actor.clientId),
+        rewards: (row.rewards ?? [])
+          .slice(-50)
+          .map(({ requestHash: _, ...entry }) => entry),
         purchases: visiblePurchases(
           row.purchases.filter(
             (purchase) =>
@@ -2157,6 +2166,164 @@ export class ShopService implements OnModuleInit {
   }
   /** The local effect is already durable. This only settles stock, never
    * executes a move, checks an effect, or requires an application ACK. */
+  /** Credits use the existing wallet CAS, so concurrent purchases or resets can
+   * never overwrite the result. The caller owns the shared activity queue. */
+  private async commitCombatRewards(
+    userId: number,
+    requested: Omit<CombatReward, 'walletRevision' | 'status' | 'reason'>[],
+  ): Promise<CombatReward[]> {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const row = await this.ensureWallet(userId);
+      const previous = row.storageRevision;
+      const receipts: CombatReward[] = [];
+      let changed = false;
+      for (const request of requested) {
+        const requestHash = digest(['combat-reward-v1', request]);
+        const prior = (row.rewards ?? []).find(
+          (entry) => entry.rewardId === request.rewardId,
+        );
+        if (prior) {
+          if (prior.requestHash !== requestHash)
+            fail(
+              'REQUEST_CONFLICT',
+              'Esta recompensa ya corresponde a otro encuentro.',
+            );
+          const { requestHash: _, ...receipt } = prior;
+          receipts.push(receipt);
+          continue;
+        }
+        if ((row.rewards?.length ?? 0) >= 8192)
+          fail(
+            'REWARD_HISTORY_FULL',
+            'El historial de recompensas requiere mantenimiento.',
+          );
+        const stale = request.epoch !== (row.rewardEpoch ?? 0);
+        if (
+          !stale &&
+          (await this.activity.busyUsers([userId], ['shop'])).length
+        )
+          fail(
+            'PLAYER_BUSY',
+            'La recompensa se confirmará al terminar la operación pendiente.',
+          );
+        if (
+          !stale &&
+          (!Number.isSafeInteger(row.balance + request.amount) ||
+            !Number.isSafeInteger(row.revision + 1))
+        )
+          fail(
+            'WALLET_CONFLICT',
+            'El saldo o la revisión está fuera de rango.',
+          );
+        if (!stale && request.amount > 0) {
+          row.balance += request.amount;
+          row.revision++;
+        }
+        const receipt: CombatReward = {
+          ...request,
+          amount: stale ? 0 : request.amount,
+          status: stale ? 'rejected' : 'credited',
+          ...(stale ? { reason: 'STALE_GAME' as const } : {}),
+          walletRevision: row.revision,
+        };
+        (row.rewards ??= []).push({ ...receipt, requestHash });
+        receipts.push(receipt);
+        changed = true;
+      }
+      if (!changed) return clone(receipts);
+      row.storageRevision++;
+      if (!(await this.repository.compareAndSwap(row, previous))) continue;
+      this.activity.changed();
+      return clone(receipts);
+    }
+    fail(
+      'WALLET_CONFLICT',
+      'La recompensa sigue pendiente. Reintenta el mismo encuentro.',
+    );
+  }
+
+  async battleRewardEpoch(userId: number): Promise<number> {
+    return (await this.ensureWallet(userId)).rewardEpoch ?? 0;
+  }
+
+  /** Internal only: PvP owns the persisted winner and preset, never an RPC. */
+  async creditBattleReward(
+    userId: number,
+    battleId: string,
+    presetId: string,
+    epoch: number,
+  ): Promise<CombatReward> {
+    const amount = trainerPresetReward(presetId);
+    if (amount === undefined)
+      fail('INVALID_TRAINER', 'No existe recompensa para este Trainer.');
+    id(battleId);
+    integer(epoch);
+    return this.activity.runExclusive(
+      [userId],
+      async () =>
+        (
+          await this.commitCombatRewards(userId, [
+            {
+              rewardId: `admin:${battleId}`,
+              userId,
+              source: 'admin-trainer',
+              battleId,
+              presetId,
+              epoch,
+              amount,
+            },
+          ])
+        )[0],
+    );
+  }
+
+  async rewardClaim(actor: Actor, payload: any): Promise<ShopState> {
+    object(payload, ['rewards']);
+    if (
+      !Array.isArray(payload.rewards) ||
+      payload.rewards.length < 1 ||
+      payload.rewards.length > 100
+    )
+      fail('INVALID_INPUT', 'Envía de una a cien recompensas pendientes.');
+    for (const claim of payload.rewards) {
+      object(claim, ['encounterId', 'epoch', 'color']);
+      id(claim.encounterId);
+      integer(claim.epoch);
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          LOCAL_TRAINER_REWARDS,
+          claim.color,
+        )
+      )
+        fail('INVALID_INPUT', 'La casilla de recompensa no es válida.');
+    }
+    this.self(actor);
+    if (actor.user.role !== 'player')
+      fail('PLAYER_REQUIRED', 'Sólo el jugador confirma sus encuentros.');
+    const verified = await this.auth.authenticate(actor.token);
+    if (verified.user.id !== actor.user.id || verified.user.role !== 'player')
+      fail('INVALID_PLAYER', 'La sesión ya no pertenece a un jugador vigente.');
+    const rewards = await this.activity.runExclusive(
+      [actor.user.id],
+      async () => {
+        this.self(actor);
+        return this.commitCombatRewards(
+          actor.user.id,
+          (payload.rewards as LocalTrainerRewardClaim[]).map((claim) => ({
+            rewardId: `local:${claim.encounterId}`,
+            userId: actor.user.id,
+            source: 'local-trainer',
+            encounterId: claim.encounterId,
+            epoch: claim.epoch,
+            color: claim.color,
+            amount: LOCAL_TRAINER_REWARDS[claim.color],
+          })),
+        );
+      },
+    );
+    return { ...(await this.sync(actor)), rewards };
+  }
+
   async consumeBatch(actor: Actor, payload: any): Promise<ShopState> {
     const operations = this.consumptionOperations(payload);
     if (payload.clientId !== actor.clientId)
@@ -2614,6 +2781,12 @@ export class ShopService implements OnModuleInit {
           };
           row.balance = 500;
           row.items = {};
+          if (!Number.isSafeInteger((row.rewardEpoch ?? 0) + 1))
+            fail(
+              'WALLET_CONFLICT',
+              'La generación de la partida está fuera de rango.',
+            );
+          row.rewardEpoch = (row.rewardEpoch ?? 0) + 1;
           row.revision++;
           row.storageRevision++;
           (row.resets ??= []).push({ ...receipt, requestHash });

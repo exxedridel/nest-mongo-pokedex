@@ -21,6 +21,7 @@ import { scaleTrainerTeam, trainerPreset } from './pvp.trainers';
 import {
   digest,
   hp,
+  maxHp,
   id,
   integer,
   object,
@@ -219,6 +220,39 @@ export class PvpService implements OnModuleInit {
       fail(
         'INVENTORY_PENDING',
         'El consumo del turno sigue pendiente. Actualiza la conexión.',
+      );
+    return this.recoverCombatRewards(battle);
+  }
+  private async recoverCombatRewards(initial: Battle): Promise<Battle> {
+    let battle = initial;
+    for (
+      let attempt = 0;
+      attempt < 20 && battle.pendingRewards?.length;
+      attempt++
+    ) {
+      if (!this.shop)
+        fail(
+          'REWARDS_UNAVAILABLE',
+          'La recompensa sigue pendiente de confirmación.',
+        );
+      const pending = battle.pendingRewards[0];
+      await this.shop.creditBattleReward(
+        pending.userId,
+        pending.battleId,
+        pending.presetId,
+        pending.epoch,
+      );
+      const previous = battle.revision;
+      const next = clone(battle);
+      next.pendingRewards = next.pendingRewards.slice(1);
+      next.revision++;
+      if (await this.repository.compareAndSwap(next, previous)) battle = next;
+      else battle = await this.repository.get(battle.battleId);
+    }
+    if (battle.pendingRewards?.length)
+      fail(
+        'REWARDS_PENDING',
+        'Recupera la recompensa antes de salir de la batalla.',
       );
     return battle;
   }
@@ -869,60 +903,108 @@ export class PvpService implements OnModuleInit {
   async finalize(actor: Actor, payload: any) {
     object(payload, ['battleId', 'hostEpoch']);
     integer(payload.hostEpoch, 1);
-    return this.mutate(payload.battleId, actor, (battle) => {
-      this.host(battle, actor, payload.hostEpoch);
-      if (battle.results && ['finalizing', 'finalized'].includes(battle.phase))
-        return false;
-      if (battle.phase !== 'finished' || !battle.session?.runtime?.ended)
-        fail('INVALID_PHASE', 'Finaliza solo una batalla terminada.');
-      const results: any = {};
-      for (const side of humanSides(battle)) {
-        const snapshot = battle.players[side].snapshot;
-        const winner = battle.session.runtime.winner;
-        const result: Result = {
-          battleId: battle.battleId,
-          resultId: randomUUID(),
-          userId: snapshot.userId,
-          snapshotId: snapshot.snapshotId,
-          baseHash: snapshot.baseHash,
-          outcome:
-            winner === 'draw' ? 'draw' : winner === side ? 'win' : 'lose',
-          patches: snapshot.pokemons.map((original) => {
-            const mon = battle.session.teams[side].pokemons.find(
-              (entry: any) => entry.captureId === original.captureId,
+    const finalized = await this.mutate(
+      payload.battleId,
+      actor,
+      async (battle) => {
+        this.host(battle, actor, payload.hostEpoch);
+        if (
+          battle.results &&
+          ['finalizing', 'finalized'].includes(battle.phase)
+        )
+          return false;
+        if (battle.phase !== 'finished' || !battle.session?.runtime?.ended)
+          fail('INVALID_PHASE', 'Finaliza solo una batalla terminada.');
+        const results: any = {};
+        for (const side of humanSides(battle)) {
+          const snapshot = battle.players[side].snapshot;
+          const winner = battle.session.runtime.winner;
+          const result: Result = {
+            battleId: battle.battleId,
+            resultId: randomUUID(),
+            userId: snapshot.userId,
+            snapshotId: snapshot.snapshotId,
+            baseHash: snapshot.baseHash,
+            outcome:
+              winner === 'draw' ? 'draw' : winner === side ? 'win' : 'lose',
+            patches: snapshot.pokemons.map((original) => {
+              const mon = battle.session.teams[side].pokemons.find(
+                (entry: any) => entry.captureId === original.captureId,
+              );
+              const statuses = (mon.statuses ?? []).filter((status: string) =>
+                PRIMARY.includes(status),
+              );
+              const statusTurns =
+                statuses.includes('asleep') && mon.statusTurns?.asleep
+                  ? { asleep: mon.statusTurns.asleep }
+                  : {};
+              const gained = (battle.session.rewards?.defeats ?? [])
+                .filter(
+                  (entry: any) =>
+                    entry.winnerSide === side &&
+                    entry.winnerCaptureId === original.captureId,
+                )
+                .reduce((sum: number, entry: any) => sum + entry.levels, 0);
+              const level = Math.min(100, original.pokemon.level + gained);
+              const leveled = level > original.pokemon.level;
+              const finalHp = leveled
+                ? Math.floor(
+                    (hp(mon) *
+                      maxHp({ ...mon, pokemon: { ...mon.pokemon, level } })) /
+                      maxHp(mon),
+                  )
+                : hp(mon);
+              return {
+                captureId: original.captureId,
+                hp: finalHp,
+                ...(leveled ? { level } : {}),
+                statuses,
+                statusTurns,
+                ...(mon.moves.some((move: any) => move.currentPp !== undefined)
+                  ? {
+                      movesPp: original.moves.map((move: any) => ({
+                        moveId: move.id,
+                        currentPp: currentMovePp(
+                          mon.moves.find(
+                            (entry: any) => entry.id === move.id,
+                          ) ?? move,
+                        ),
+                      })),
+                    }
+                  : {}),
+              };
+            }),
+          };
+          results[side] = result;
+        }
+        battle.results = results;
+        if (
+          battle.mode === 'trainer' &&
+          battle.session.rewards?.version === 1 &&
+          battle.session.runtime.winner === 'a' &&
+          battle.session.teams.b.pokemons.every((mon: any) => hp(mon) === 0)
+        ) {
+          if (!this.shop)
+            fail(
+              'REWARDS_UNAVAILABLE',
+              'No se pudo preparar la recompensa del Trainer.',
             );
-            const statuses = (mon.statuses ?? []).filter((status: string) =>
-              PRIMARY.includes(status),
-            );
-            const statusTurns =
-              statuses.includes('asleep') && mon.statusTurns?.asleep
-                ? { asleep: mon.statusTurns.asleep }
-                : {};
-            return {
-              captureId: original.captureId,
-              hp: hp(mon),
-              statuses,
-              statusTurns,
-              ...(mon.moves.some((move: any) => move.currentPp !== undefined)
-                ? {
-                    movesPp: original.moves.map((move: any) => ({
-                      moveId: move.id,
-                      currentPp: currentMovePp(
-                        mon.moves.find((entry: any) => entry.id === move.id) ??
-                          move,
-                      ),
-                    })),
-                  }
-                : {}),
-            };
-          }),
-        };
-        results[side] = result;
-      }
-      battle.results = results;
-      battle.commands = [];
-      battle.phase = 'finalizing';
-    });
+          battle.pendingRewards = [
+            {
+              userId: battle.players.a.user.id,
+              battleId: battle.battleId,
+              presetId: battle.trainer.presetId,
+              epoch: await this.shop.battleRewardEpoch(
+                battle.players.a.user.id,
+              ),
+            },
+          ];
+        }
+        battle.commands = [];
+        battle.phase = 'finalizing';
+      },
+    );
+    return this.recoverCombatRewards(finalized);
   }
   async applied(actor: Actor, payload: any) {
     object(payload, ['battleId', 'resultId', 'snapshotId', 'baseHash']);

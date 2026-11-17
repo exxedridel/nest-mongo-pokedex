@@ -33,6 +33,40 @@ describe('Mongo wallet atomic replacement (real Mongoose, fake driver)', () => {
     repository = new MongoShopRepository(fixture.model);
   });
   afterEach(() => fixture.dispose());
+  it('preserves reward generation and terminal receipts atomically without backfilling legacy documents', async () => {
+    const row = wallet();
+    await repository.insert(row);
+    const legacy = await repository.get(2);
+    expect(legacy).not.toHaveProperty('rewardEpoch');
+    expect(walletView(legacy).rewardEpoch).toBe(0);
+    const next = {
+      ...legacy,
+      rewardEpoch: 1,
+      balance: 700,
+      revision: 1,
+      storageRevision: 1,
+      rewards: [
+        {
+          rewardId: 'local:win',
+          userId: 2,
+          source: 'local-trainer' as const,
+          encounterId: 'win',
+          epoch: 1,
+          color: 'pink' as const,
+          amount: 200,
+          walletRevision: 1,
+          status: 'credited' as const,
+          requestHash: 'original-reward-hash',
+        },
+      ],
+    };
+    expect(await repository.compareAndSwap(next, 0)).toBe(true);
+    expect(await repository.get(2)).toMatchObject(next);
+    expect(await repository.compareAndSwap({ ...next, balance: 900 }, 0)).toBe(
+      false,
+    );
+    expect((await repository.get(2)).balance).toBe(700);
+  });
   it('roundtrips independent background streams, hashes and terminal rejections without adding fields to legacy wallets', async () => {
     const row = wallet();
     await repository.insert(row);

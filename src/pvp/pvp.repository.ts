@@ -41,6 +41,7 @@ export const PvpBattleSchema = new Schema(
     itemInventory: Schema.Types.Mixed,
     itemCommands: Schema.Types.Mixed,
     pendingInventoryCheckpoint: Schema.Types.Mixed,
+    pendingRewards: { type: [Schema.Types.Mixed], default: undefined },
   },
   {
     collection: 'pvp_battles',

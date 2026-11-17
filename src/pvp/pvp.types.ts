@@ -54,6 +54,8 @@ export type Result = {
   patches: {
     captureId: string;
     hp: number;
+    /** Absolute level after end-of-battle rewards; absent on legacy results. */
+    level?: number;
     statuses: string[];
     statusTurns: Record<string, number>;
     movesPp?: { moveId: number; currentPp: number }[];
@@ -133,6 +135,12 @@ export type Battle = {
       moveId?: number;
     }[];
   };
+  pendingRewards?: {
+    userId: number;
+    battleId: string;
+    presetId: string;
+    epoch: number;
+  }[];
 };
 export const humanSides = (battle: Battle): Side[] =>
   battle.mode === 'trainer' ? ['a'] : SIDES;

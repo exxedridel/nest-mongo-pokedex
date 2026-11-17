@@ -33,6 +33,8 @@ export const ShopWalletSchema = new Schema(
     consumptionClients: { type: [Schema.Types.Mixed], default: undefined },
     consumptions: { type: [Schema.Types.Mixed], default: undefined },
     battleUses: { type: [Schema.Types.Mixed], default: [] },
+    rewardEpoch: { type: Number, default: undefined },
+    rewards: { type: [Schema.Types.Mixed], default: undefined },
   },
   {
     collection: 'shop_wallets',

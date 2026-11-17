@@ -1560,6 +1560,7 @@ describe('Full Restore local inventory use', () => {
       const expectedItems = { ...before.items, [itemId]: 0 };
       expect(used.wallet).toEqual({
         userId: 2,
+        rewardEpoch: 0,
         balance: before.balance,
         currencyVersion: 1,
         revision: 1,
@@ -2817,6 +2818,31 @@ describe('Shop Socket.IO authenticated namespace', () => {
     });
     return socket;
   }
+  it('claims trainer rewards over Socket.IO without PREPARE and broadcasts the central balance once', async () => {
+    const player = await connect(2);
+    let prepares = 0;
+    player.on('shop:prepare', () => {
+      prepares++;
+    });
+    await emit(player, 'shop:presence', { ready: true, localBattle: false });
+    const payload = {
+      rewards: [
+        { encounterId: 'socket-trainer-victory', color: 'red', epoch: 0 },
+      ],
+    };
+    const first = await emit(player, 'shop:reward-claim', payload);
+    expect(first.ok).toBe(true);
+    expect(first.wallet).toMatchObject({ balance: 1100, rewardEpoch: 0 });
+    expect(first.rewards[0]).toMatchObject({ amount: 600, status: 'credited' });
+    const replay = await emit(player, 'shop:reward-claim', payload);
+    expect(replay.wallet.balance).toBe(1100);
+    expect(replay.rewards).toEqual(first.rewards);
+    expect(prepares).toBe(0);
+    const admin = await connect(1);
+    expect((await emit(admin, 'shop:reward-claim', payload)).error.code).toBe(
+      'PLAYER_REQUIRED',
+    );
+  });
   it('settles local consumptions over Socket.IO without PREPARE and broadcasts the client watermark including terminal stock conflicts', async () => {
     const admin = await connect(1),
       player = await connect(2),

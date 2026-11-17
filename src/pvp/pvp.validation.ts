@@ -417,6 +417,7 @@ export function validateSession(session: any, battle: Battle) {
     'runtime',
     'history',
     'networkItems',
+    'rewards',
   ]);
   size(session, 2 * 1024 * 1024);
   if (
@@ -512,6 +513,97 @@ export function validateSession(session: any, battle: Battle) {
   }
   if (!Array.isArray(session.history) || session.history.length > 500)
     fail('INVALID_CHECKPOINT', 'Historial demasiado grande.');
+  const previousRewards = battle.session?.rewards;
+  if (previousRewards !== undefined && session.rewards === undefined)
+    fail(
+      'INVALID_CHECKPOINT',
+      'Las recompensas registradas no pueden desaparecer.',
+    );
+  if (session.rewards !== undefined) {
+    object(session.rewards, ['version', 'defeats']);
+    const defeats = session.rewards.defeats;
+    const prior = previousRewards?.defeats ?? [];
+    if (
+      session.rewards.version !== 1 ||
+      !Array.isArray(defeats) ||
+      defeats.length > 8192 ||
+      defeats.length < prior.length ||
+      new Set(defeats.map((entry: any) => entry?.id)).size !== defeats.length ||
+      stableJson(defeats.slice(0, prior.length)) !== stableJson(prior)
+    )
+      fail(
+        'INVALID_CHECKPOINT',
+        'El registro de recompensas no es válido o retrocede.',
+      );
+    if (!battle.session && defeats.length)
+      fail(
+        'INVALID_CHECKPOINT',
+        'La batalla debe empezar sin derrotas premiadas.',
+      );
+    for (const [index, entry] of defeats.entries()) {
+      object(entry, [
+        'id',
+        'winnerSide',
+        'winnerCaptureId',
+        'defeatedSide',
+        'defeatedCaptureId',
+        'winnerLevel',
+        'defeatedLevel',
+        'levels',
+      ]);
+      id(entry.id);
+      if (
+        !SIDES.includes(entry.winnerSide) ||
+        !SIDES.includes(entry.defeatedSide) ||
+        entry.winnerSide === entry.defeatedSide
+      )
+        fail('INVALID_CHECKPOINT', 'Los equipos de la derrota no coinciden.');
+      id(entry.winnerCaptureId);
+      id(entry.defeatedCaptureId);
+      const winner = session.teams[entry.winnerSide].pokemons.find(
+        (mon: any) => mon.captureId === entry.winnerCaptureId,
+      );
+      const defeated = session.teams[entry.defeatedSide].pokemons.find(
+        (mon: any) => mon.captureId === entry.defeatedCaptureId,
+      );
+      if (
+        !winner ||
+        !defeated ||
+        winner.pokemon.level !== entry.winnerLevel ||
+        defeated.pokemon.level !== entry.defeatedLevel ||
+        entry.levels !== (entry.defeatedLevel > entry.winnerLevel ? 2 : 1)
+      )
+        fail(
+          'INVALID_CHECKPOINT',
+          'La recompensa no corresponde a estos Pokémon y niveles.',
+        );
+      if (index >= prior.length) {
+        const before = battle.session?.teams?.[
+          entry.defeatedSide
+        ]?.pokemons.find(
+          (mon: any) => mon.captureId === entry.defeatedCaptureId,
+        );
+        if (!before || hp(before) <= 0 || hp(defeated) !== 0)
+          fail(
+            'INVALID_CHECKPOINT',
+            'La recompensa requiere una derrota nueva en este checkpoint.',
+          );
+        if (
+          defeats
+            .slice(prior.length, index)
+            .some(
+              (other: any) =>
+                other.defeatedSide === entry.defeatedSide &&
+                other.defeatedCaptureId === entry.defeatedCaptureId,
+            )
+        )
+          fail(
+            'INVALID_CHECKPOINT',
+            'Una derrota no puede premiarse dos veces.',
+          );
+      }
+    }
+  }
   if (session.phase === 'setup') {
     if (session.runtime !== null)
       fail('INVALID_CHECKPOINT', 'Runtime inesperado.');
