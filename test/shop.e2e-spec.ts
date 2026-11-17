@@ -1805,6 +1805,382 @@ describe('Full Restore local inventory use', () => {
   });
 });
 
+describe('Background local inventory consumption batches', () => {
+  let auth: ReturnType<typeof fakeAuth>,
+    clients: Record<number, Actor>,
+    repo: MemoryShopRepository,
+    activity: PlayerActivityService,
+    service: ShopService;
+  const presence = {
+    ready: true,
+    localBattle: false,
+    supportsBackgroundItemUses: true,
+  };
+  const operation = (sequence = 1, overrides: Record<string, any> = {}) => ({
+    operationId: `local-${sequence}`,
+    sequence,
+    itemId: 'full-restore',
+    quantity: 1,
+    captureId: 'local-pokemon',
+    context: 'party',
+    ...overrides,
+  });
+  const batch = (operations = [operation()], clientId = 'shop-client-2') => ({
+    clientId,
+    operations,
+  });
+  beforeEach(async () => {
+    auth = fakeAuth();
+    clients = actors(auth);
+    repo = new MemoryShopRepository();
+    activity = new PlayerActivityService();
+    service = new ShopService(repo, auth as any, activity);
+    await service.onModuleInit();
+    Object.values(clients).forEach((actor) => service.connect(actor));
+    for (const userId of [2, 3])
+      await service.presence(clients[userId], presence);
+    repo.rows.get(2).items = {
+      'full-restore': 3,
+      'max-ether': 2,
+      'max-elixir': 2,
+      tm: 2,
+      'poke-ball': 2,
+      'great-ball': 2,
+      'ultra-ball': 2,
+    };
+    service.setPrepareHandler(async (_owner, request) => ({
+      ok: true,
+      revision: request.expectedWalletRevision,
+      operation: request.operation,
+    }));
+  });
+  it('advertises a separate stream per browser without changing legacy currency or inventing owner restrictions', async () => {
+    expect((await service.sync(clients[2])).wallet).toMatchObject({
+      balance: 500,
+      revision: 0,
+      consumptionAck: { clientId: clients[2].clientId, throughSequence: 0 },
+    });
+    const alternate = {
+      ...clients[2],
+      socketId: 'second-browser',
+      clientId: '__proto__',
+    };
+    service.connect(alternate);
+    await service.presence(alternate, presence);
+    expect((await service.sync(alternate)).wallet.consumptionAck).toEqual({
+      clientId: '__proto__',
+      throughSequence: 0,
+    });
+    expect(
+      (await service.sync(clients[2])).wallet.consumptionAck.clientId,
+    ).toBe(clients[2].clientId);
+    expect((await repo.get(2)).consumptionClients).toHaveLength(2);
+    expect((await repo.get(2)).balance).toBe(500);
+    expect((await repo.get(2)).revision).toBe(0);
+    const old = {
+      ...clients[3],
+      socketId: 'legacy-browser',
+      clientId: 'legacy-browser',
+    };
+    service.connect(old);
+    await service.presence(old, { ready: true, localBattle: false });
+    expect((await service.sync(old)).wallet).not.toHaveProperty(
+      'consumptionAck',
+    );
+  });
+  it('settles all usable items in one CAS revision without effect plans, catalogue checks or application ACKs', async () => {
+    const requests = [
+      'full-restore',
+      'max-ether',
+      'max-elixir',
+      'tm',
+      'poke-ball',
+      'great-ball',
+      'ultra-ball',
+    ].map((itemId, index) =>
+      operation(index + 1, {
+        itemId,
+        context: itemId.endsWith('ball') ? 'local-battle' : 'party',
+        ...(['max-ether', 'tm'].includes(itemId) ? { moveId: 33 } : {}),
+      }),
+    );
+    const quote = jest.spyOn(service.catalog, 'quote');
+    const result = await service.consumeBatch(clients[2], batch(requests));
+    expect(result.consumptions).toHaveLength(7);
+    expect(
+      result.consumptions.every((entry) => entry.status === 'accepted'),
+    ).toBe(true);
+    expect(result.consumptions.some((entry) => 'requestHash' in entry)).toBe(
+      false,
+    );
+    expect(result.wallet).toMatchObject({
+      balance: 500,
+      revision: 1,
+      consumptionAck: { clientId: clients[2].clientId, throughSequence: 7 },
+    });
+    expect((await repo.get(2)).uses).toEqual([]);
+    expect((await repo.get(2)).consumptions).toHaveLength(7);
+    expect((await repo.get(2)).items['full-restore']).toBe(2);
+    expect((await repo.get(2)).items.tm).toBe(1);
+    await expect(activity.assertAvailable([2])).resolves.toBeUndefined();
+    expect(quote).not.toHaveBeenCalled();
+  });
+  it('records insufficient stock as terminal rejections in sequence and repeats their metadata in every wallet snapshot', async () => {
+    repo.rows.get(2).items['full-restore'] = 1;
+    const requests = [
+      operation(1),
+      operation(2),
+      operation(3, { itemId: 'tm', moveId: 33 }),
+    ];
+    const result = await service.consumeBatch(clients[2], batch(requests));
+    expect(result.consumptions.map((entry) => entry.status)).toEqual([
+      'accepted',
+      'rejected',
+      'accepted',
+    ]);
+    expect(result.wallet.items['full-restore']).toBe(0);
+    expect(result.wallet.revision).toBe(1);
+    expect(result.wallet.consumptionAck).toEqual({
+      clientId: clients[2].clientId,
+      throughSequence: 3,
+      rejected: [
+        {
+          operationId: 'local-2',
+          sequence: 2,
+          itemId: 'full-restore',
+          reason: 'INSUFFICIENT_ITEMS',
+        },
+      ],
+    });
+    expect((await service.sync(clients[2])).wallet.consumptionAck).toEqual(
+      result.wallet.consumptionAck,
+    );
+    const before = await repo.get(2);
+    expect(
+      (await service.consumeBatch(clients[2], batch(requests))).consumptions,
+    ).toEqual(result.consumptions);
+    expect(await repo.get(2)).toEqual(before);
+    const rejected = await service.consumeBatch(
+      clients[2],
+      batch([operation(4)]),
+    );
+    expect(rejected.consumptions[0].status).toBe('rejected');
+    expect(rejected.wallet.revision).toBe(1);
+    expect((await repo.get(2)).storageRevision).toBe(
+      before.storageRevision + 1,
+    );
+    expect(rejected.wallet.consumptionAck.throughSequence).toBe(4);
+  });
+  it('allows two devices to compete for the last unit without negatives, owner takeover or a permanent rejected queue', async () => {
+    repo.rows.get(2).items['full-restore'] = 1;
+    const alternate = {
+      ...clients[2],
+      socketId: 'alternate-socket',
+      clientId: 'alternate-client',
+    };
+    service.connect(alternate);
+    await service.presence(alternate, presence);
+    const [first, second] = await Promise.all([
+      service.consumeBatch(clients[2], batch()),
+      service.consumeBatch(alternate, batch([operation()], alternate.clientId)),
+    ]);
+    expect(first.consumptions[0].status).toBe('accepted');
+    expect(second.consumptions[0]).toMatchObject({
+      status: 'rejected',
+      reason: 'INSUFFICIENT_ITEMS',
+    });
+    expect(first.wallet.consumptionAck.clientId).toBe(clients[2].clientId);
+    expect(second.wallet.consumptionAck).toMatchObject({
+      clientId: alternate.clientId,
+      throughSequence: 1,
+    });
+    expect((await repo.get(2)).items['full-restore']).toBe(0);
+    expect((await repo.get(2)).consumptions).toHaveLength(2);
+    const before = await repo.get(2);
+    await service.consumeBatch(
+      alternate,
+      batch([operation()], alternate.clientId),
+    );
+    expect(await repo.get(2)).toEqual(before);
+    expect(
+      (await service.sync(clients[2])).wallet.consumptionAck,
+    ).not.toHaveProperty('rejected');
+    expect(
+      (await service.sync(clients[3])).wallet.consumptionAck.throughSequence,
+    ).toBe(0);
+  });
+  it('deduplicates replayed prefixes and rejects altered operation IDs or sequence content without partial writes', async () => {
+    await service.consumeBatch(clients[2], batch());
+    await service.consumeBatch(clients[2], batch([operation(), operation(2)]));
+    const before = await repo.get(2);
+    expect(before.items['full-restore']).toBe(1);
+    expect(before.revision).toBe(2);
+    for (const changed of [
+      operation(1, { itemId: 'max-elixir' }),
+      operation(3, { operationId: 'local-1' }),
+    ])
+      await expect(
+        service.consumeBatch(clients[2], batch([changed])),
+      ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    await expect(
+      service.consumeBatch(clients[2], batch([operation(4)])),
+    ).rejects.toMatchObject({ code: 'CONSUMPTION_GAP' });
+    expect(await repo.get(2)).toEqual(before);
+  });
+  it('recovers an ACK lost before reload or restart by replaying the same accepted and rejected records', async () => {
+    repo.rows.get(2).items['full-restore'] = 1;
+    const requests = [operation(1), operation(2)];
+    const result = await service.consumeBatch(clients[2], batch(requests));
+    const restarted = new ShopService(
+      repo,
+      auth as any,
+      new PlayerActivityService(),
+      service.catalog,
+    );
+    await restarted.onModuleInit();
+    restarted.connect(clients[2]);
+    await restarted.presence(clients[2], {
+      ...presence,
+      ready: false,
+      pendingConsumption: true,
+    });
+    const replay = await restarted.consumeBatch(clients[2], batch(requests));
+    expect(replay.consumptions).toEqual(result.consumptions);
+    expect(replay.wallet.consumptionAck).toEqual(result.wallet.consumptionAck);
+    expect((await repo.get(2)).consumptions).toHaveLength(2);
+    expect((await repo.get(2)).revision).toBe(1);
+  });
+  it('rejects malformed batches, client spoofing, unsupported capabilities and invalid contexts without advancing a watermark', async () => {
+    const before = await repo.get(2);
+    const invalid = [
+      [],
+      Array.from({ length: 101 }, (_, index) => operation(index + 1)),
+      [operation(0)],
+      [operation(1, { quantity: 2 })],
+      [operation(1, { itemId: 'bicycle' })],
+      [operation(1, { itemId: 'tm', moveId: 33, context: 'local-battle' })],
+      [operation(1, { itemId: 'poke-ball' })],
+      [operation(1, { moveId: 1 })],
+      [operation(1, { itemId: 'max-ether', moveId: 355 })],
+      [operation(1, { planHash: 'anything' })],
+      [operation(1), operation(2, { operationId: 'local-1' })],
+    ];
+    for (const operations of invalid)
+      await expect(
+        service.consumeBatch(clients[2], batch(operations)),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(
+      service.consumeBatch(clients[2], batch([operation()], 'other-client')),
+    ).rejects.toMatchObject({ code: 'OWNER_REQUIRED' });
+    await expect(
+      service.consumeBatch(
+        clients[1],
+        batch([operation()], clients[1].clientId),
+      ),
+    ).rejects.toMatchObject({ code: 'PLAYER_REQUIRED' });
+    await service.presence(clients[2], { ready: true, localBattle: false });
+    await expect(
+      service.consumeBatch(clients[2], batch()),
+    ).rejects.toMatchObject({ code: 'PLAYER_UPDATE_REQUIRED' });
+    expect(await repo.get(2)).toEqual(before);
+  });
+  it('does not make auth failures, revoked sessions or storage failures terminal and retries the same operations safely', async () => {
+    const before = await repo.get(2);
+    const originalAuth = auth.authenticate.bind(auth);
+    auth.authenticate = async () => {
+      throw new MessageAuthError('AUTH_UNAVAILABLE', 'temporary auth outage');
+    };
+    await expect(
+      service.consumeBatch(clients[2], batch()),
+    ).rejects.toMatchObject({ code: 'AUTH_UNAVAILABLE' });
+    expect(await repo.get(2)).toEqual(before);
+    auth.authenticate = originalAuth;
+    jest
+      .spyOn(repo, 'compareAndSwap')
+      .mockRejectedValueOnce(new Error('storage unavailable'));
+    await expect(service.consumeBatch(clients[2], batch())).rejects.toThrow(
+      'storage unavailable',
+    );
+    expect(await repo.get(2)).toEqual(before);
+    jest.spyOn(repo, 'compareAndSwap').mockResolvedValueOnce(false);
+    await service.consumeBatch(clients[2], batch());
+    expect((await repo.get(2)).items['full-restore']).toBe(2);
+    expect((await repo.get(2)).consumptions).toHaveLength(1);
+  });
+  it('fences a disconnected browser or role change while final authentication is outstanding', async () => {
+    const original = auth.authenticate.bind(auth);
+    auth.authenticate = async (token) => {
+      const result = await original(token);
+      service.disconnect(clients[2].socketId);
+      return result;
+    };
+    await expect(
+      service.consumeBatch(clients[2], batch()),
+    ).rejects.toMatchObject({ code: 'SESSION_CHANGED' });
+    expect((await repo.get(2)).consumptions ?? []).toEqual([]);
+    expect((await repo.get(2)).items['full-restore']).toBe(3);
+  });
+  it('advertises a pending queue as unavailable for external operations while allowing its background settlement', async () => {
+    await service.presence(clients[2], {
+      ...presence,
+      ready: true,
+      localBattle: true,
+      pendingConsumption: true,
+    });
+    const row = (await service.sync(clients[1])).players.find(
+      (entry) => entry.user.id === 2,
+    );
+    expect(row).toMatchObject({
+      ready: false,
+      pending: true,
+      pendingConsumption: true,
+    });
+    await expect(activity.assertAvailable([2])).rejects.toMatchObject({
+      code: 'PLAYER_BUSY',
+    });
+    await expect(service.purchase(clients[1], input())).rejects.toMatchObject({
+      code: 'PLAYER_BUSY',
+    });
+    await expect(service.reset(clients[2], resetInput())).rejects.toMatchObject(
+      { code: 'PLAYER_BUSY' },
+    );
+    await service.consumeBatch(clients[2], batch());
+    expect((await repo.get(2)).items['full-restore']).toBe(2);
+    await service.presence(clients[2], presence);
+    await expect(activity.assertAvailable([2])).resolves.toBeUndefined();
+  });
+  it('finishes a legacy pending use with its exact old fingerprint before settling background operations', async () => {
+    const request = {
+      requestId: 'legacy-before-background',
+      captureId: 'local-pokemon',
+      context: 'party',
+      planHash: 'a'.repeat(64),
+      expectedWalletRevision: 0,
+    };
+    const legacy = await service.use(clients[2], request);
+    expect((await repo.get(2)).uses[0].requestHash).toBe(
+      digest([
+        2,
+        clients[2].clientId,
+        request.captureId,
+        request.context,
+        request.planHash,
+        0,
+      ]),
+    );
+    await expect(
+      service.consumeBatch(clients[2], batch()),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    await service.useApplied(clients[2], {
+      requestId: request.requestId,
+      revision: legacy.use.walletRevision,
+    });
+    await service.consumeBatch(clients[2], batch());
+    expect((await repo.get(2)).items['full-restore']).toBe(1);
+    expect((await service.use(clients[2], request)).use.status).toBe('applied');
+  });
+});
+
 describe('Durable administrator item gifts', () => {
   let auth: ReturnType<typeof fakeAuth>,
     clients: Record<number, Actor>,
@@ -2441,6 +2817,97 @@ describe('Shop Socket.IO authenticated namespace', () => {
     });
     return socket;
   }
+  it('settles local consumptions over Socket.IO without PREPARE and broadcasts the client watermark including terminal stock conflicts', async () => {
+    const admin = await connect(1),
+      player = await connect(2),
+      other = await connect(3);
+    const operation = (sequence: number) => ({
+      operationId: `socket-local-${sequence}`,
+      sequence,
+      itemId: 'full-restore',
+      quantity: 1,
+      captureId: 'local-actor',
+      context: 'party',
+    });
+    const request = {
+      clientId: 'shop-client-2',
+      operations: [operation(1), operation(2)],
+    };
+    await emit(player, 'shop:sync', {});
+    expect((await emit(player, 'shop:consume-batch', request)).error.code).toBe(
+      'PLAYER_UPDATE_REQUIRED',
+    );
+    await emit(player, 'shop:presence', {
+      ready: true,
+      localBattle: false,
+      supportsBackgroundItemUses: true,
+      pendingConsumption: true,
+    });
+    const repo = app.get(ShopService).repository as MemoryShopRepository;
+    repo.rows.get(2).items['full-restore'] = 1;
+    const prepare = jest.fn();
+    player.on('shop:prepare', prepare);
+    const result = await emit(player, 'shop:consume-batch', request);
+    expect(result.ok).toBe(true);
+    expect(result.consumptions.map((entry) => entry.status)).toEqual([
+      'accepted',
+      'rejected',
+    ]);
+    expect(result.wallet).toMatchObject({
+      balance: 500,
+      revision: 1,
+      items: { 'full-restore': 0 },
+      consumptionAck: {
+        clientId: 'shop-client-2',
+        throughSequence: 2,
+        rejected: [
+          {
+            operationId: 'socket-local-2',
+            sequence: 2,
+            itemId: 'full-restore',
+            reason: 'INSUFFICIENT_ITEMS',
+          },
+        ],
+      },
+    });
+    expect(prepare).not.toHaveBeenCalled();
+    expect((await emit(player, 'shop:sync', {})).wallet.consumptionAck).toEqual(
+      result.wallet.consumptionAck,
+    );
+    expect(
+      (await emit(player, 'shop:consume-batch', request)).consumptions,
+    ).toEqual(result.consumptions);
+    expect(
+      (
+        await emit(admin, 'shop:consume-batch', {
+          ...request,
+          clientId: 'shop-client-1',
+        })
+      ).error.code,
+    ).toBe('PLAYER_REQUIRED');
+    expect((await emit(other, 'shop:sync', {})).wallet).not.toHaveProperty(
+      'consumptionAck',
+    );
+    const selected = (await emit(admin, 'shop:sync', {})).players.find(
+      (entry) => entry.user.id === 2,
+    );
+    expect(selected).toMatchObject({
+      ready: false,
+      pendingConsumption: true,
+      pending: true,
+    });
+    await emit(player, 'shop:presence', {
+      ready: true,
+      localBattle: false,
+      supportsBackgroundItemUses: true,
+      pendingConsumption: false,
+    });
+    expect(
+      (await emit(admin, 'shop:sync', {})).players.find(
+        (entry) => entry.user.id === 2,
+      ).pending,
+    ).toBe(false);
+  });
   it('gifts items through an operation-aware player PREPARE and publishes private receipts without changing cash or prices', async () => {
     const admin = await connect(1),
       player = await connect(2),

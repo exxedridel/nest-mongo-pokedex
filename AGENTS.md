@@ -9,6 +9,19 @@ Acuerdo del usuario confirmado el 2026-11-08:
 
 Si esta disponible, leer [la memoria compartida](../PROJECT_MEMORY.md). Este resumen se conserva tambien aqui para sesiones que abran solo este repositorio.
 
+Etapa vigente2026-11-16 React2.12.0: shop:consume-batch max100seq/client/opID/hash,
+ACK enWalletdesdeMISMOrowstock; consumptions+consumptionClients optional. User
+eligióinventarioCENTRAL con efectosfrontinstantáneos+syncBG yMULTIdispositivos,
+NOownerúnico. Accept/rejectstockinsuf terminalavanzaACK sinnegativos; Partyefectos
+no se revierten. Auth/format/gap/conflictID/transient no confirma. Cap nuevo
+supportsBackgroundItemUses,pendingConsumption/readyfalse excluyeopsadminhastaflush.
+PvP registrybattle-consumption permiteflushcollectingantesownsnapshot/barrier,
+presupuestofreshcentralalúltimosnapshot incluyecollectinglegacy. ActivebloqueaBG
+nuevo,replaypermitido. Adminmotor/grants/checkpointcentral unchanged; no normalizar
+legacyhash/planes/outbox. 185Shop51PvP/buildPASS, ChromeLocalItems/CaptureLegacy+
+ShopCOMPLETO PASSsinJSerrors. Nest→React/recargar2.12.0 sinvars/MySQL/seed/reset/
+borrados. Ver memoria/LOCAL_ITEM_SYNC_PROTOCOL, producciónnoverificada.
+
 Etapa vigente2026-11-14 React2.11.0: shop:gift admin1–99, ledgerpurchases kindgift
 total0/saldoigual/hashdominio propio, sincatalogquote/commit; legacyshapeintacta.
 cap supportsItemGifts+ACKPREPAREoperationgift antesCAS, metaadmin/item/qty. Validar

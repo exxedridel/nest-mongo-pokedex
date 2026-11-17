@@ -16,6 +16,7 @@ import {
   centerView,
   CONSUMABLE_ITEM_IDS,
   ConsumableItemId,
+  ConsumptionOperation,
   fail,
   GameReset,
   ItemUse,
@@ -137,6 +138,14 @@ export class ShopService implements OnModuleInit {
         )
         .map((row) => row.userId);
     });
+    this.activity.register('consumption-queue', async (userIds) => {
+      const requested = new Set(userIds);
+      return [...this.actors.values()]
+        .filter(
+          (actor) => requested.has(actor.user.id) && actor.pendingConsumption,
+        )
+        .map((actor) => actor.user.id);
+    });
   }
   async fullRestoreStock(userId: number): Promise<number> {
     return (await this.repository.get(userId))?.items['full-restore'] ?? 0;
@@ -216,6 +225,8 @@ export class ShopService implements OnModuleInit {
       supportsBalanceAdjustments: previous?.supportsBalanceAdjustments ?? false,
       supportsCenterHealing: previous?.supportsCenterHealing ?? false,
       supportsItemGifts: previous?.supportsItemGifts ?? false,
+      supportsBackgroundItemUses: previous?.supportsBackgroundItemUses ?? false,
+      pendingConsumption: previous?.pendingConsumption ?? false,
     });
   }
   disconnect(socketId: string) {
@@ -274,6 +285,8 @@ export class ShopService implements OnModuleInit {
       'supportsBalanceAdjustments',
       'supportsCenterHealing',
       'supportsItemGifts',
+      'supportsBackgroundItemUses',
+      'pendingConsumption',
     ]);
     if (
       typeof payload.ready !== 'boolean' ||
@@ -283,7 +296,13 @@ export class ShopService implements OnModuleInit {
       (payload.supportsCenterHealing !== undefined &&
         typeof payload.supportsCenterHealing !== 'boolean') ||
       (payload.supportsItemGifts !== undefined &&
-        typeof payload.supportsItemGifts !== 'boolean')
+        typeof payload.supportsItemGifts !== 'boolean') ||
+      (payload.supportsBackgroundItemUses !== undefined &&
+        typeof payload.supportsBackgroundItemUses !== 'boolean') ||
+      (payload.pendingConsumption !== undefined &&
+        typeof payload.pendingConsumption !== 'boolean') ||
+      (payload.pendingConsumption === true &&
+        payload.supportsBackgroundItemUses !== true)
     )
       fail('INVALID_INPUT', 'Estado de conexión de tienda no válido.');
     this.self(actor);
@@ -295,13 +314,49 @@ export class ShopService implements OnModuleInit {
     return this.activity.runExclusive([actor.user.id], async () => {
       this.self(actor);
       const current = this.actors.get(actor.socketId);
-      current.ready = payload.ready;
+      current.ready = payload.ready && payload.pendingConsumption !== true;
       current.localBattle = payload.localBattle;
       current.supportsBalanceAdjustments =
         payload.supportsBalanceAdjustments === true;
       current.supportsCenterHealing = payload.supportsCenterHealing === true;
       current.supportsItemGifts = payload.supportsItemGifts === true;
-      await this.ensureWallet(actor.user.id);
+      current.supportsBackgroundItemUses =
+        payload.supportsBackgroundItemUses === true;
+      current.pendingConsumption = payload.pendingConsumption === true;
+      let wallet = await this.ensureWallet(actor.user.id);
+      if (
+        current.supportsBackgroundItemUses &&
+        !wallet.consumptionClients?.some(
+          (entry) => entry.clientId === actor.clientId,
+        )
+      ) {
+        for (let attempt = 0; attempt < 20; attempt++) {
+          if (
+            wallet.consumptionClients?.some(
+              (entry) => entry.clientId === actor.clientId,
+            )
+          )
+            break;
+          if ((wallet.consumptionClients?.length ?? 0) >= 128)
+            fail(
+              'CONSUMPTION_CLIENT_LIMIT',
+              'Esta cuenta alcanzó el límite de navegadores de inventario.',
+            );
+          const previous = wallet.storageRevision;
+          (wallet.consumptionClients ??= []).push({
+            clientId: actor.clientId,
+            throughSequence: 0,
+          });
+          wallet.storageRevision++;
+          if (await this.repository.compareAndSwap(wallet, previous)) break;
+          wallet = await this.repository.get(actor.user.id);
+          if (attempt === 19)
+            fail(
+              'WALLET_CONFLICT',
+              'No se pudo preparar la sincronización del inventario.',
+            );
+        }
+      }
       this.activity.changed();
       return this.state(actor, {});
     });
@@ -364,7 +419,7 @@ export class ShopService implements OnModuleInit {
               })(),
             }
           : {}),
-        wallet: walletView(row),
+        wallet: walletView(row, actor.clientId),
         purchases: visiblePurchases(
           row.purchases.filter(
             (purchase) =>
@@ -454,13 +509,14 @@ export class ShopService implements OnModuleInit {
         online: true,
         ready: current.ready,
         inBattle: current.localBattle || busy.has(candidate.user.id),
-        wallet: wallet ? walletView(wallet) : null,
+        wallet: wallet ? walletView(wallet, candidate.clientId) : null,
         pending:
           pending ||
           pendingReset ||
           pendingUse ||
           pendingAdjustment ||
-          pendingCenter,
+          pendingCenter ||
+          current.pendingConsumption,
         pendingReset,
         pendingUse,
         pendingAdjustment,
@@ -468,6 +524,8 @@ export class ShopService implements OnModuleInit {
         pendingCenter,
         supportsCenterHealing: current.supportsCenterHealing,
         supportsItemGifts: current.supportsItemGifts,
+        supportsBackgroundItemUses: current.supportsBackgroundItemUses,
+        pendingConsumption: current.pendingConsumption,
       });
     }
     const rows = await this.repository.forAdmin(actor.user.id);
@@ -2026,6 +2084,234 @@ export class ShopService implements OnModuleInit {
           ? 'Usa la acción de objeto del combate mientras estás en batalla.'
           : 'La batalla local cambió; vuelve a preparar el uso del objeto.',
       );
+  }
+  private consumptionOperations(payload: any): ConsumptionOperation[] {
+    object(payload, ['clientId', 'operations']);
+    id(payload.clientId);
+    if (
+      !Array.isArray(payload.operations) ||
+      payload.operations.length < 1 ||
+      payload.operations.length > 100
+    )
+      fail('INVALID_INPUT', 'Envía entre uno y cien consumos locales.');
+    const ids = new Set<string>();
+    let previous: number | undefined;
+    return payload.operations.map((operation: any) => {
+      object(operation, [
+        'operationId',
+        'sequence',
+        'itemId',
+        'quantity',
+        'captureId',
+        'context',
+        'moveId',
+      ]);
+      id(operation.operationId);
+      id(operation.captureId);
+      integer(operation.sequence, 1);
+      if (
+        operation.quantity !== 1 ||
+        !USABLE_ITEM_IDS.includes(operation.itemId) ||
+        !['party', 'local-battle'].includes(operation.context) ||
+        ids.has(operation.operationId) ||
+        (previous !== undefined && operation.sequence !== previous + 1)
+      )
+        fail(
+          'INVALID_INPUT',
+          'El lote de consumos no tiene una secuencia válida.',
+        );
+      if (operation.itemId === 'max-ether' || operation.itemId === 'tm')
+        integer(operation.moveId, 1, 354);
+      else if (operation.moveId !== undefined)
+        fail('INVALID_INPUT', 'Este objeto no admite un movimiento objetivo.');
+      if (
+        (operation.itemId === 'tm' && operation.context !== 'party') ||
+        (BALL_ITEM_IDS.includes(operation.itemId) &&
+          operation.context !== 'local-battle')
+      )
+        fail('INVALID_INPUT', 'El contexto del objeto no es válido.');
+      ids.add(operation.operationId);
+      previous = operation.sequence;
+      return clone(operation);
+    });
+  }
+  private consumptionSession(actor: Actor, row: WalletRecord) {
+    this.self(actor);
+    if (actor.user.role !== 'player')
+      fail('PLAYER_REQUIRED', 'Sólo el jugador sincroniza sus consumos.');
+    const connected = this.actors.get(actor.socketId);
+    if (!connected?.supportsBackgroundItemUses)
+      fail(
+        'PLAYER_UPDATE_REQUIRED',
+        'Reconecta la app actualizada antes de sincronizar la Bag.',
+      );
+    if (
+      !row.consumptionClients?.some(
+        (entry) => entry.clientId === actor.clientId,
+      )
+    )
+      fail(
+        'PLAYER_NOT_READY',
+        'Anuncia la conexión de este navegador antes de sincronizar consumos.',
+      );
+  }
+  /** The local effect is already durable. This only settles stock, never
+   * executes a move, checks an effect, or requires an application ACK. */
+  async consumeBatch(actor: Actor, payload: any): Promise<ShopState> {
+    const operations = this.consumptionOperations(payload);
+    if (payload.clientId !== actor.clientId)
+      fail('OWNER_REQUIRED', 'El lote pertenece a otro navegador.');
+    this.self(actor);
+    if (actor.user.role !== 'player')
+      fail('PLAYER_REQUIRED', 'Sólo el jugador sincroniza sus consumos.');
+    await this.activity.runExclusive([actor.user.id], async () => {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const row = await this.repository.get(actor.user.id);
+        if (!row)
+          fail(
+            'PLAYER_NOT_READY',
+            'Sincroniza tu Bag antes de confirmar sus consumos.',
+          );
+        this.consumptionSession(actor, row);
+        const ledger = row.consumptions ?? [];
+        const stream = row.consumptionClients.find(
+          (entry) => entry.clientId === actor.clientId,
+        );
+        let through = stream.throughSequence;
+        const fresh: {
+          operation: ConsumptionOperation;
+          requestHash: string;
+        }[] = [];
+        for (const operation of operations) {
+          const requestHash = digest([
+            'background-item-use',
+            actor.user.id,
+            actor.clientId,
+            operation.operationId,
+            operation.sequence,
+            operation.itemId,
+            operation.quantity,
+            operation.captureId,
+            operation.context,
+            operation.moveId ?? null,
+          ]);
+          const prior = ledger.find(
+            (entry) =>
+              entry.clientId === actor.clientId &&
+              (entry.sequence === operation.sequence ||
+                entry.operationId === operation.operationId),
+          );
+          if (prior) {
+            if (
+              prior.clientId !== actor.clientId ||
+              prior.requestHash !== requestHash
+            )
+              fail(
+                'REQUEST_CONFLICT',
+                'Ese consumo ya corresponde a otra operación.',
+              );
+            continue;
+          }
+          if (operation.sequence !== through + 1)
+            fail(
+              'CONSUMPTION_GAP',
+              'Recupera primero los consumos anteriores de este navegador.',
+            );
+          through = operation.sequence;
+          fresh.push({ operation, requestHash });
+        }
+        if (!fresh.length) return;
+        if (ledger.length + fresh.length > 8192)
+          fail(
+            'CONSUMPTION_HISTORY_FULL',
+            'El historial de consumos requiere mantenimiento.',
+          );
+        if (
+          (
+            await this.activity.busyUsers(
+              [actor.user.id],
+              ['shop', 'battle-consumption'],
+            )
+          ).length
+        )
+          fail(
+            'PLAYER_BUSY',
+            'Confirma la operación pendiente antes de sincronizar consumos nuevos.',
+          );
+        const verified = await this.auth.authenticate(actor.token);
+        if (
+          verified.user.id !== actor.user.id ||
+          verified.user.role !== 'player'
+        )
+          fail(
+            'INVALID_PLAYER',
+            'La sesión ya no pertenece a un jugador vigente.',
+          );
+        this.consumptionSession(actor, row);
+        if (
+          (
+            await this.activity.busyUsers(
+              [actor.user.id],
+              ['shop', 'battle-consumption'],
+            )
+          ).length
+        )
+          fail(
+            'PLAYER_BUSY',
+            'La batalla ya congeló el inventario de este equipo.',
+          );
+        const previous = row.storageRevision;
+        const results = fresh.map(({ operation, requestHash }) => {
+          const accepted = (row.items[operation.itemId] ?? 0) > 0;
+          if (accepted) row.items[operation.itemId]--;
+          return {
+            ...operation,
+            userId: actor.user.id,
+            clientId: actor.clientId,
+            status: accepted ? ('accepted' as const) : ('rejected' as const),
+            ...(accepted ? {} : { reason: 'INSUFFICIENT_ITEMS' as const }),
+            walletRevision: row.revision,
+            requestHash,
+          };
+        });
+        const accepted = results.some((entry) => entry.status === 'accepted');
+        if (accepted && !Number.isSafeInteger(row.revision + 1))
+          fail(
+            'WALLET_CONFLICT',
+            'La revisión de la cartera está fuera de rango.',
+          );
+        if (accepted) row.revision++;
+        row.storageRevision++;
+        stream.throughSequence = through;
+        (row.consumptions ??= []).push(
+          ...results.map((entry) => ({
+            ...entry,
+            walletRevision: row.revision,
+          })),
+        );
+        if (!(await this.repository.compareAndSwap(row, previous))) continue;
+        this.activity.changed();
+        return;
+      }
+      fail(
+        'WALLET_CONFLICT',
+        'No se pudo confirmar el lote. Reintenta las mismas operaciones.',
+      );
+    });
+    const state = await this.sync(actor, {});
+    const row = await this.repository.get(actor.user.id);
+    return {
+      ...state,
+      consumptions: (row.consumptions ?? [])
+        .filter(
+          (entry) =>
+            entry.clientId === actor.clientId &&
+            operations.some(
+              (operation) => operation.sequence === entry.sequence,
+            ),
+        )
+        .map(({ requestHash: _, ...entry }) => entry),
+    };
   }
   async use(actor: Actor, payload: any): Promise<ShopState> {
     const requestHash = this.itemUseRequest(actor, payload);

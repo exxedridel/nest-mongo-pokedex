@@ -30,6 +30,8 @@ export const ShopWalletSchema = new Schema(
     adjustments: { type: [Schema.Types.Mixed], default: undefined },
     centerRevision: { type: Number, default: undefined },
     centerHeals: { type: [Schema.Types.Mixed], default: undefined },
+    consumptionClients: { type: [Schema.Types.Mixed], default: undefined },
+    consumptions: { type: [Schema.Types.Mixed], default: undefined },
     battleUses: { type: [Schema.Types.Mixed], default: [] },
   },
   {

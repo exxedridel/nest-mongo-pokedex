@@ -54,6 +54,21 @@ export class PvpService implements OnModuleInit {
         ),
       ];
     });
+    // A local outbox may predate the administrator's collecting reservation.
+    // It must settle before this player's snapshot freezes the battle budget.
+    this.activity?.register('battle-consumption', async (userIds) => {
+      const requested = new Set(userIds);
+      return (await this.repository.locked()).flatMap((battle) =>
+        humanSides(battle)
+          .filter(
+            (side) =>
+              requested.has(battle.players[side].user.id) &&
+              (battle.phase !== 'collecting' ||
+                !!battle.players[side].snapshot),
+          )
+          .map((side) => battle.players[side].user.id),
+      );
+    });
   }
   connect(actor: Actor) {
     this.actors.set(actor.socketId, actor);
@@ -125,7 +140,11 @@ export class PvpService implements OnModuleInit {
   }
   private async recoverInventoryCheckpoint(initial: Battle): Promise<Battle> {
     let battle = initial;
-    if ((!battle.inventory || !battle.itemInventory) && this.shop) {
+    if (
+      battle.phase !== 'collecting' &&
+      (!battle.inventory || !battle.itemInventory) &&
+      this.shop
+    ) {
       for (
         let attempt = 0;
         attempt < 20 && (!battle.inventory || !battle.itemInventory);
@@ -526,33 +545,68 @@ export class PvpService implements OnModuleInit {
   async snapshot(actor: Actor, payload: any) {
     object(payload, ['snapshot']);
     const snapshot = validateSnapshot(payload.snapshot);
-    return this.mutate(snapshot.battleId, actor, (battle) => {
-      const side = this.owner(battle, actor);
-      if (
-        snapshot.userId !== actor.user.id ||
-        snapshot.clientId !== actor.clientId
-      )
-        fail('OWNER_REQUIRED', 'La instantánea no pertenece a esta sesión.');
-      const previous = battle.players[side].snapshot;
-      if (previous) {
-        if (stableJson(previous) !== stableJson(snapshot))
-          fail(
-            'SNAPSHOT_CONFLICT',
-            'El equipo ya fue confirmado con otros datos.',
-          );
-        return false;
-      }
-      if (battle.phase !== 'collecting')
-        fail('INVALID_PHASE', 'La batalla no está recopilando equipos.');
-      battle.players[side].snapshot = clone(snapshot);
-      if (battle.mode === 'trainer')
-        battle.trainer.team = scaleTrainerTeam(
-          battle.trainer,
-          snapshot.hpMultiplier,
+    const save = () =>
+      this.mutate(snapshot.battleId, actor, async (battle) => {
+        const side = this.owner(battle, actor);
+        if (
+          snapshot.userId !== actor.user.id ||
+          snapshot.clientId !== actor.clientId
+        )
+          fail('OWNER_REQUIRED', 'La instantánea no pertenece a esta sesión.');
+        const previous = battle.players[side].snapshot;
+        if (previous) {
+          if (stableJson(previous) !== stableJson(snapshot))
+            fail(
+              'SNAPSHOT_CONFLICT',
+              'El equipo ya fue confirmado con otros datos.',
+            );
+          return false;
+        }
+        if (battle.phase !== 'collecting')
+          fail('INVALID_PHASE', 'La batalla no está recopilando equipos.');
+        const wallet = await this.shop?.repository.get(actor.user.id);
+        const consumptionAck = wallet?.consumptionClients?.find(
+          (entry) => entry.clientId === actor.clientId,
         );
-      if (humanSides(battle).every((key) => battle.players[key].snapshot))
-        battle.phase = 'ready';
-    });
+        if (consumptionAck) {
+          const barrier = snapshot.consumptionBarrier;
+          if (
+            !barrier ||
+            barrier.clientId !== actor.clientId ||
+            barrier.clientId !== consumptionAck.clientId ||
+            barrier.throughSequence !== consumptionAck.throughSequence
+          )
+            fail(
+              'INVENTORY_PENDING',
+              'Sincroniza todos los consumos locales antes de enviar el equipo.',
+            );
+        }
+        battle.players[side].snapshot = clone(snapshot);
+        if (battle.mode === 'trainer')
+          battle.trainer.team = scaleTrainerTeam(
+            battle.trainer,
+            snapshot.hpMultiplier,
+          );
+        if (humanSides(battle).every((key) => battle.players[key].snapshot)) {
+          // Refresh even a collecting document saved by an older deployment:
+          // its initial budget may predate a local outbox that just settled.
+          if (this.shop) {
+            battle.inventory ??= {};
+            battle.itemInventory ??= {};
+            for (const human of humanSides(battle)) {
+              const stock = await this.shop.battleItemStock(
+                battle.players[human].user.id,
+              );
+              battle.itemInventory[human] = stock;
+              battle.inventory[human] = stock['full-restore'] ?? 0;
+            }
+          }
+          battle.phase = 'ready';
+        }
+      });
+    return this.activity
+      ? this.activity.runExclusive([actor.user.id], save)
+      : save();
   }
   async claim(actor: Actor, payload: any) {
     object(payload, ['battleId']);

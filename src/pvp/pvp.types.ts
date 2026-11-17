@@ -34,6 +34,7 @@ export type Snapshot = {
   pokemons: Capture[];
   activeCaptureId: string;
   hpMultiplier: number;
+  consumptionBarrier?: { clientId: string; throughSequence: number };
 };
 export type Command = {
   commandId: string;

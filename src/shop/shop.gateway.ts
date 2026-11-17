@@ -255,6 +255,7 @@ export class ShopGateway
       | 'resetApplied'
       | 'resetCancel'
       | 'use'
+      | 'consumeBatch'
       | 'useApplied'
       | 'useCancel'
       | 'priceSet'
@@ -323,6 +324,12 @@ export class ShopGateway
     @MessageBody() payload: any,
   ) {
     return this.run(socket, 'presence', payload);
+  }
+  @SubscribeMessage('shop:consume-batch') consumeBatch(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'consumeBatch', payload);
   }
   @SubscribeMessage('shop:purchase') purchase(
     @ConnectedSocket() socket: Socket,

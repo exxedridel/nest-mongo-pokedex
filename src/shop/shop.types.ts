@@ -86,12 +86,40 @@ export const USABLE_ITEM_IDS = [
   ...BALL_ITEM_IDS,
 ] as const;
 export type UsableItemId = (typeof USABLE_ITEM_IDS)[number];
+export type ConsumptionAck = {
+  clientId: string;
+  throughSequence: number;
+  rejected?: {
+    operationId: string;
+    sequence: number;
+    itemId: UsableItemId;
+    reason: 'INSUFFICIENT_ITEMS';
+  }[];
+};
+export type ConsumptionOperation = {
+  operationId: string;
+  sequence: number;
+  itemId: UsableItemId;
+  quantity: 1;
+  captureId: string;
+  context: 'party' | 'local-battle';
+  moveId?: number;
+};
+export type ConsumptionResult = ConsumptionOperation & {
+  userId: number;
+  clientId: string;
+  status: 'accepted' | 'rejected';
+  reason?: 'INSUFFICIENT_ITEMS';
+  walletRevision: number;
+};
+export type StoredConsumption = ConsumptionResult & { requestHash: string };
 export type Wallet = {
   userId: number;
   balance: number;
   revision: number;
   items: Partial<Record<ShopItemId, number>>;
   currencyVersion: 1;
+  consumptionAck?: ConsumptionAck;
 };
 export type Purchase = {
   /** Absent for purchases, including genuine purchases priced at zero. */
@@ -139,7 +167,7 @@ export type ItemUse = {
   status: 'pending' | 'applied' | 'cancelled';
 };
 export type StoredItemUse = ItemUse & { requestHash: string };
-export type WalletRecord = Wallet & {
+export type WalletRecord = Omit<Wallet, 'consumptionAck'> & {
   storageRevision: number;
   purchases: StoredPurchase[];
   // Absent on wallets created before game reset support.
@@ -148,6 +176,8 @@ export type WalletRecord = Wallet & {
   adjustments?: StoredBalanceAdjustment[];
   centerRevision?: number;
   centerHeals?: StoredCenterHeal[];
+  consumptions?: StoredConsumption[];
+  consumptionClients?: { clientId: string; throughSequence: number }[];
   battleUses?: {
     key: string;
     battleId: string;
@@ -162,6 +192,8 @@ export type ShopActor = Actor & {
   supportsBalanceAdjustments: boolean;
   supportsCenterHealing: boolean;
   supportsItemGifts: boolean;
+  supportsBackgroundItemUses: boolean;
+  pendingConsumption: boolean;
 };
 export type ShopPlayer = {
   user: UserPublic;
@@ -178,8 +210,11 @@ export type ShopPlayer = {
   pendingCenter?: boolean;
   supportsCenterHealing?: boolean;
   supportsItemGifts?: boolean;
+  supportsBackgroundItemUses?: boolean;
+  pendingConsumption?: boolean;
 };
 export type ShopState = {
+  consumptions?: ConsumptionResult[];
   catalog?: ShopCatalog;
   adjustment?: BalanceAdjustment;
   adjustments?: BalanceAdjustment[];
@@ -206,13 +241,34 @@ export const fail = (code: string, message: string): never => {
   throw new ShopError(code, message);
 };
 export const clone = <T>(value: T): T => structuredClone(value);
-export function walletView(record: WalletRecord): Wallet {
+export function walletView(record: WalletRecord, clientId?: string): Wallet {
+  const stream = record.consumptionClients?.find(
+    (entry) => entry.clientId === clientId,
+  );
+  const rejected = (record.consumptions ?? [])
+    .filter(
+      (entry) => entry.clientId === clientId && entry.status === 'rejected',
+    )
+    .map(({ operationId, sequence, itemId, reason }) => ({
+      operationId,
+      sequence,
+      itemId,
+      reason,
+    }));
   return clone({
     userId: record.userId,
     balance: record.balance,
     revision: record.revision,
     items: record.items,
     currencyVersion: record.currencyVersion,
+    ...(stream
+      ? {
+          consumptionAck: {
+            ...stream,
+            ...(rejected.length ? { rejected } : {}),
+          },
+        }
+      : {}),
   });
 }
 export function purchaseView(record: StoredPurchase): Purchase {

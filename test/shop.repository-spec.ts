@@ -3,7 +3,7 @@ import {
   MongoShopRepository,
   ShopWalletSchema,
 } from '../src/shop/shop.repository';
-import { WalletRecord } from '../src/shop/shop.types';
+import { WalletRecord, walletView } from '../src/shop/shop.types';
 import {
   MongoShopCatalogRepository,
   ShopCatalogSchema,
@@ -33,6 +33,67 @@ describe('Mongo wallet atomic replacement (real Mongoose, fake driver)', () => {
     repository = new MongoShopRepository(fixture.model);
   });
   afterEach(() => fixture.dispose());
+  it('roundtrips independent background streams, hashes and terminal rejections without adding fields to legacy wallets', async () => {
+    const row = wallet();
+    await repository.insert(row);
+    expect(await repository.get(2)).not.toHaveProperty('consumptionClients');
+    const operation = {
+      operationId: 'same-id',
+      sequence: 1,
+      itemId: 'full-restore' as const,
+      quantity: 1 as const,
+      captureId: 'target',
+      context: 'party' as const,
+      userId: 2,
+      walletRevision: 1,
+    };
+    const updated = await repository.get(2);
+    updated.items['full-restore'] = 0;
+    updated.revision = 1;
+    updated.storageRevision++;
+    updated.consumptionClients = [
+      { clientId: 'first', throughSequence: 1 },
+      { clientId: '__proto__', throughSequence: 1 },
+    ];
+    updated.consumptions = [
+      {
+        ...operation,
+        clientId: 'first',
+        status: 'accepted',
+        requestHash: 'hash-first',
+      },
+      {
+        ...operation,
+        clientId: '__proto__',
+        status: 'rejected',
+        reason: 'INSUFFICIENT_ITEMS',
+        requestHash: 'hash-second',
+      },
+    ];
+    expect(await repository.compareAndSwap(updated, 0)).toBe(true);
+    const restored = await repository.get(2);
+    expect(restored.consumptions).toEqual(updated.consumptions);
+    expect(walletView(restored, 'first').consumptionAck).toEqual({
+      clientId: 'first',
+      throughSequence: 1,
+    });
+    expect(walletView(restored, '__proto__').consumptionAck).toEqual({
+      clientId: '__proto__',
+      throughSequence: 1,
+      rejected: [
+        {
+          operationId: 'same-id',
+          sequence: 1,
+          itemId: 'full-restore',
+          reason: 'INSUFFICIENT_ITEMS',
+        },
+      ],
+    });
+    expect(walletView(restored, 'unregistered')).not.toHaveProperty(
+      'consumptionAck',
+    );
+    expect(restored.balance).toBe(500);
+  });
   it('roundtrips item gift receipts and precommit tombstones without rewriting a legacy purchase', async () => {
     const row = wallet();
     const legacy = {

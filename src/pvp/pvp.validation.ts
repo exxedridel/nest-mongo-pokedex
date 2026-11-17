@@ -315,6 +315,7 @@ export function validateSnapshot(value: any): Snapshot {
     'pokemons',
     'activeCaptureId',
     'hpMultiplier',
+    'consumptionBarrier',
   ]);
   size(value, 512 * 1024);
   if (value.version !== 1 || value.dataVersion !== '1.6.0')
@@ -322,6 +323,16 @@ export function validateSnapshot(value: any): Snapshot {
   id(value.battleId);
   id(value.snapshotId);
   id(value.clientId);
+  if (value.consumptionBarrier !== undefined) {
+    object(value.consumptionBarrier, ['clientId', 'throughSequence']);
+    id(value.consumptionBarrier.clientId);
+    integer(value.consumptionBarrier.throughSequence);
+    if (value.consumptionBarrier.clientId !== value.clientId)
+      fail(
+        'INVALID_SNAPSHOT',
+        'La confirmación de Bag pertenece a otro navegador.',
+      );
+  }
   integer(value.userId, 1);
   if (
     !Number.isFinite(value.hpMultiplier) ||

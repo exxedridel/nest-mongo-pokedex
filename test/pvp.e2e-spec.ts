@@ -1184,6 +1184,189 @@ describe('Real PvP Socket.IO gateway with fake authoritative auth and memory dur
     expect((await repo.get(battle.battleId)).lockHeld).toBe(false);
   });
 });
+describe('Background consumption snapshot barriers', () => {
+  let repo: MemoryPvpRepository,
+    wallets: MemoryShopRepository,
+    shop: ShopService,
+    pvp: PvpService,
+    auth: ReturnType<typeof fakeAuth>,
+    actors: Record<number, Actor>;
+  const operation = (sequence = 1) => ({
+    operationId: `pre-battle-${sequence}`,
+    sequence,
+    itemId: 'full-restore',
+    quantity: 1,
+    captureId: 'past-local-actor',
+    context: 'local-battle',
+  });
+  const batch = (sequence = 1) => ({
+    clientId: 'client-2',
+    operations: [operation(sequence)],
+  });
+  const barrierSnapshot = (
+    battle: Battle,
+    userId: number,
+    throughSequence = 0,
+  ) => ({
+    ...snapshot(battle, userId, actors[userId].clientId),
+    consumptionBarrier: { clientId: actors[userId].clientId, throughSequence },
+  });
+  beforeEach(async () => {
+    auth = fakeAuth();
+    repo = new MemoryPvpRepository();
+    wallets = new MemoryShopRepository();
+    const activity = new PlayerActivityService();
+    shop = new ShopService(wallets, auth as any, activity);
+    pvp = new PvpService(repo, auth as any, activity, shop);
+    await shop.onModuleInit();
+    await pvp.onModuleInit();
+    actors = Object.fromEntries(
+      [...auth.users.values()].map((user) => [
+        user.id,
+        {
+          user: clone(user),
+          clientId: `client-${user.id}`,
+          socketId: `socket-${user.id}`,
+          token: `test-user-${user.id}`,
+        },
+      ]),
+    ) as any;
+    for (const actor of Object.values(actors)) {
+      shop.connect(actor);
+      pvp.connect(actor);
+    }
+    for (const userId of [2, 3]) {
+      await shop.presence(actors[userId], {
+        ready: true,
+        localBattle: false,
+        supportsBackgroundItemUses: true,
+      });
+      wallets.rows.get(userId).items['full-restore'] = 2;
+    }
+  });
+  it.each(['pvp', 'trainer'])(
+    'settles a preexisting outbox during %s collection and freezes fresh canonical stock at the snapshot barrier',
+    async (mode) => {
+      let battle = await pvp.create(actors[1], {
+        commandId: `batch-${mode}`,
+        playerAId: 2,
+        ...(mode === 'trainer'
+          ? { trainerPresetId: 'kanto-brock' }
+          : { playerBId: 3 }),
+      });
+      await pvp.sync(actors[1], { battleId: battle.battleId });
+      expect((await repo.get(battle.battleId)).inventory).toBeUndefined();
+      await shop.presence(actors[2], {
+        ready: false,
+        localBattle: false,
+        supportsBackgroundItemUses: true,
+        pendingConsumption: true,
+      });
+      const settled = await shop.consumeBatch(actors[2], batch());
+      expect(settled.wallet.items['full-restore']).toBe(1);
+      await expect(
+        pvp.snapshot(actors[2], {
+          snapshot: snapshot(battle, 2, actors[2].clientId),
+        }),
+      ).rejects.toMatchObject({ code: 'INVENTORY_PENDING' });
+      await expect(
+        pvp.snapshot(actors[2], { snapshot: barrierSnapshot(battle, 2, 0) }),
+      ).rejects.toMatchObject({ code: 'INVENTORY_PENDING' });
+      await pvp.snapshot(actors[2], {
+        snapshot: barrierSnapshot(battle, 2, 1),
+      });
+      await expect(
+        shop.consumeBatch(actors[2], batch(2)),
+      ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+      expect(
+        (await shop.consumeBatch(actors[2], batch())).consumptions[0].status,
+      ).toBe('accepted');
+      if (mode === 'pvp')
+        await pvp.snapshot(actors[3], { snapshot: barrierSnapshot(battle, 3) });
+      battle = await repo.get(battle.battleId);
+      expect(battle.phase).toBe('ready');
+      expect(battle.itemInventory.a['full-restore']).toBe(1);
+      expect(battle.inventory.a).toBe(1);
+      if (mode === 'pvp') expect(battle.inventory.b).toBe(2);
+      const active = await pvp.checkpoint(actors[1], {
+        battleId: battle.battleId,
+        hostEpoch: 1,
+        expectedCheckpointRevision: 0,
+        session: session(battle),
+        processedCommandIds: [],
+      });
+      expect(active.phase).toBe('active');
+      await expect(
+        shop.consumeBatch(actors[2], batch(2)),
+      ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+      expect((await wallets.get(2)).consumptions).toHaveLength(1);
+      expect((await wallets.get(2)).items['full-restore']).toBe(1);
+    },
+  );
+  it('refreshes budgets from a legacy collecting document after background settlement without rewriting old snapshots', async () => {
+    const battle = await pvp.create(actors[1], {
+      commandId: 'legacy-collecting',
+      playerAId: 2,
+      playerBId: 3,
+    });
+    const old = await repo.get(battle.battleId);
+    old.inventory = { a: 2, b: 2 };
+    old.itemInventory = { a: { 'full-restore': 2 }, b: { 'full-restore': 2 } };
+    old.revision++;
+    await repo.compareAndSwap(old, old.revision - 1);
+    await shop.consumeBatch(actors[2], batch());
+    await pvp.snapshot(actors[2], { snapshot: barrierSnapshot(battle, 2, 1) });
+    await pvp.snapshot(actors[3], { snapshot: barrierSnapshot(battle, 3) });
+    expect((await repo.get(battle.battleId)).inventory).toEqual({ a: 1, b: 2 });
+    const oldSnapshot = snapshot(battle, 2, actors[2].clientId);
+    const original = stableJson(oldSnapshot);
+    expect(validateSnapshot(oldSnapshot)).toEqual(oldSnapshot);
+    expect(stableJson(oldSnapshot)).toBe(original);
+    expect(oldSnapshot).not.toHaveProperty('consumptionBarrier');
+  });
+  it('serializes an asynchronous background CAS before a queued snapshot and rejects gaps without freezing stale inventory', async () => {
+    const battle = await pvp.create(actors[1], {
+      commandId: 'barrier-race',
+      playerAId: 2,
+      playerBId: 3,
+    });
+    const original = auth.authenticate.bind(auth);
+    let entered: () => void, release: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    auth.authenticate = async (token) => {
+      const result = await original(token);
+      if (token === actors[2].token) {
+        entered();
+        await hold;
+      }
+      return result;
+    };
+    const settling = shop.consumeBatch(actors[2], batch());
+    await started;
+    const sending = pvp.snapshot(actors[2], {
+      snapshot: barrierSnapshot(battle, 2, 1),
+    });
+    release();
+    await settling;
+    await sending;
+    await pvp.snapshot(actors[3], { snapshot: barrierSnapshot(battle, 3) });
+    expect((await repo.get(battle.battleId)).inventory.a).toBe(1);
+    await expect(shop.consumeBatch(actors[2], batch(3))).rejects.toMatchObject({
+      code: 'CONSUMPTION_GAP',
+    });
+    expect(
+      (await wallets.get(2)).consumptionClients.find(
+        (entry) => entry.clientId === actors[2].clientId,
+      ).throughSequence,
+    ).toBe(1);
+  });
+});
+
 describe('Full Restore battle inventory settlement', () => {
   let repo: MemoryPvpRepository,
     wallets: MemoryShopRepository,

@@ -5,6 +5,31 @@ comunica las instancias React por Socket.IO. `/mensajes-prueba` permite elegir
 cualquier otro usuario registrado y conversar en privado. No hay una lista fija
 de dos correos. Las batallas y la Tienda usan los namespaces descritos abajo.
 
+## Consumo en segundo plano: namespace `/shop`
+
+React2.12.0 aplica los objetos del frontend del jugador localmente y envía
+`shop:consume-batch {clientId,operations}` sin esperar validación para continuar
+jugando. Nest mantiene el inventario central. Operaciones secuenciales, IDs y
+hashes estables permiten reintentar sin volver a cobrar. El ACK por navegador
+viaja en cada Wallet junto a las existencias del mismo documento.
+
+Varios dispositivos pueden usar la cuenta. Stock insuficiente produce un
+rechazo terminal y avanza el ACK sin negativos; la app ajusta la Bag y conserva
+las acciones locales ya guardadas. Auth, formato, secuencia y fallos transitorios
+no confirman ni eliminan consumos. Las extensiones `consumptions` y
+`consumptionClients` son opcionales en carteras anteriores.
+
+Compras, regalos y operaciones administrativas esperan el inventario sincronizado.
+JcJ/Trainer mantienen el débito central de objetos del admin; el snapshot añade
+una barrera opcional de sincronización y el presupuesto se actualiza antes de
+pasar a ready. Las reservas collecting permiten terminar consumos anteriores.
+Se conservan checkpoints, outbox, hashes y handlers legacy.
+
+El D20 nuevo se calcula y guarda en React al tocar la bola; Nest recibe sólo el
+consumo de inventario. Desplegar Nest primero y React después y recargar ambos
+a2.12.0, sin nuevas variables, MySQL, seed ni reinicio de partidas. Ver
+[LOCAL_ITEM_SYNC_PROTOCOL.md](../LOCAL_ITEM_SYNC_PROTOCOL.md).
+
 ## Regalos de objetos: namespace `/shop`
 
 React2.11.0 añade `shop:gift` para entregar1–99 objetos desde Back office a un
@@ -46,7 +71,7 @@ Desde React2.9.0, `shop_catalog.captureDifficulty` es un campo opcional0..20
 {requestId,modifier,expectedCatalogRevision}` con autenticación vigente,
 CAS e historial idempotente. Comparte revisión/mutex con los precios.
 
-Los nuevos lanzamientos incluyen `expectedCaptureRevision`; la revisión se
+Los lanzamientos2.9–2.11 incluyen `expectedCaptureRevision`; la revisión se
 comprueba también dentro del mutex que protege el CAS final de la wallet.
 Si cambia antes del cobro, CAPTURE_RULES_CHANGED rechaza sin consumir. El recibo
 añade `captureRevision` sólo a esos lanzamientos. Huellas/recibos anteriores
@@ -62,8 +87,9 @@ no cobran de nuevo y un consumo comprometido conserva el gasto. No cambia saldo
 ni otros objetos. CONSUMABLE_ITEM_IDS mantiene los tres consumibles del admin:
 las bolas no se habilitan en PvP/Trainer.
 
-D20 físico, resultado manual Capturada/Escapó y respuesta automática del salvaje
-siguen en React. El intento pagado bloquea la Party hasta guardar su resultado.
+El protocolo2.8–2.11 usaba D20 físico y resultado manual en React. Desde2.12.0
+los lanzamientos nuevos son automáticos y consumen en segundo plano; los intentos
+antiguos pagados se recuperan sin cambiar sus recibos ni cobrar otra bola.
 No se traslada el motor o la Party a Nest. Ver
 [POKEBALL_PROTOCOL.md](../POKEBALL_PROTOCOL.md). Desplegar Nest antes de React;
 sin variables, MySQL, schema, seed ni borrados de datos.
