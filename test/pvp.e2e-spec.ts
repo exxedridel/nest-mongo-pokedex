@@ -299,6 +299,278 @@ describe('Durable PvP service, repository and private projection', () => {
     });
     return { battle, shop, wallets };
   }
+  async function featureBattle(trainer = true, extraMembers = false) {
+    const activity = new PlayerActivityService();
+    const wallets = new MemoryShopRepository();
+    const shop = new ShopService(wallets, auth as any, activity);
+    await shop.onModuleInit();
+    service = new PvpService(repo, auth as any, activity, shop);
+    await service.onModuleInit();
+    for (const actor of Object.values(actors)) {
+      service.connect(actor);
+      shop.connect(actor);
+    }
+    for (const userId of [2, 3])
+      await shop.presence(actors[userId], { ready: true, localBattle: false });
+    const created = await service.create(actors[1], {
+      commandId: 'new-features',
+      playerAId: 2,
+      levelRewards: 'immediate',
+      ...(trainer
+        ? { trainerPresetId: 'kanto-brock', rewardBundleVersion: 1 }
+        : { playerBId: 3 }),
+    });
+    let battle: Battle = created;
+    for (const userId of trainer ? [2] : [2, 3]) {
+      const snap = snapshot(created, userId, actors[userId].clientId);
+      if (extraMembers) {
+        snap.pokemons.push({
+          ...clone(snap.pokemons[0]),
+          captureId: `second-${userId}`,
+        });
+        const fainted = {
+          ...clone(snap.pokemons[0]),
+          captureId: `fainted-${userId}`,
+        };
+        fainted.pokemon.stats.find((stat: any) => stat.name === 'hp').value = 0;
+        snap.pokemons.push(fainted);
+        snap.baseHash = digest(snap.pokemons);
+      }
+      battle = await service.snapshot(actors[userId], { snapshot: snap });
+    }
+    return { battle, shop, wallets };
+  }
+  const immediateSession = (battle: Battle) => ({
+    ...session(battle),
+    rewards: {
+      version: 1,
+      defeats: [],
+      timing: 'immediate',
+      eligibleSides: battle.mode === 'trainer' ? ['a'] : ['a', 'b'],
+      appliedCount: 0,
+    },
+  });
+  const fixtureLevel = (mon: any, level: number) => {
+    const baseHp = mon.pokemon.baseStats.find(
+      (stat: any) => stat.name === 'hp',
+    ).value;
+    const oldMax = Math.floor(
+      (Math.floor((baseHp * mon.pokemon.level) / 50) + mon.pokemon.level + 10) *
+        (mon.pokemon.hpMultiplier ?? 1.3),
+    );
+    const oldHp = mon.pokemon.stats.find(
+      (stat: any) => stat.name === 'hp',
+    ).value;
+    mon.pokemon.level = level;
+    mon.pokemon.stats = mon.pokemon.baseStats.map((stat: any) => {
+      const value =
+        Math.floor((stat.value * level) / 50) +
+        (stat.name === 'hp' ? level + 10 : 5);
+      return {
+        name: stat.name,
+        value:
+          stat.name === 'hp'
+            ? Math.floor(
+                (oldHp *
+                  Math.floor(value * (mon.pokemon.hpMultiplier ?? 1.3))) /
+                  oldMax,
+              )
+            : value,
+      };
+    });
+  };
+  const fixtureDefeat = (
+    next: any,
+    winnerSide: 'a' | 'b',
+    defeatedSide: 'a' | 'b',
+    defeatedIndex = 0,
+  ) => {
+    const winner = next.teams[winnerSide].pokemons[0];
+    const defeated = next.teams[defeatedSide].pokemons[defeatedIndex];
+    defeated.pokemon.stats.find((stat: any) => stat.name === 'hp').value = 0;
+    next.rewards.defeats.push({
+      id: `ko:${next.runtime.serial}:${next.rewards.defeats.length}`,
+      winnerSide,
+      winnerCaptureId: winner.captureId,
+      defeatedSide,
+      defeatedCaptureId: defeated.captureId,
+      winnerLevel: winner.pokemon.level,
+      defeatedLevel: defeated.pokemon.level,
+      levels: defeated.pokemon.level > winner.pokemon.level ? 2 : 1,
+    });
+  };
+  it('persists a living human lead before start without changing team order, snapshots or opponent privacy', async () => {
+    const { battle } = await featureBattle(false, true);
+    const originals = clone(battle.players);
+    const payload = {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      side: 'a',
+      captureId: 'second-2',
+      expectedRevision: battle.revision,
+    };
+    const selected = await service.lead(actors[1], payload);
+    expect(selected.leads).toEqual({ a: 'second-2' });
+    expect(selected.players).toEqual(originals);
+    expect((await service.lead(actors[1], payload)).revision).toBe(
+      selected.revision,
+    );
+    expect(service.view(selected, actors[3]).leads).toEqual({});
+    expect(service.view(selected, actors[2]).leads).toEqual({ a: 'second-2' });
+    await expect(
+      service.lead(actors[1], {
+        ...payload,
+        captureId: 'same-id-across-players',
+      }),
+    ).rejects.toMatchObject({ code: 'REVISION_CONFLICT' });
+    await expect(
+      service.lead(actors[2], {
+        ...payload,
+        expectedRevision: selected.revision,
+      }),
+    ).rejects.toMatchObject({ code: 'HOST_REQUIRED' });
+    await expect(
+      service.lead(actors[1], {
+        ...payload,
+        captureId: 'fainted-2',
+        expectedRevision: selected.revision,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_LEAD' });
+    const proposed = immediateSession(selected);
+    expect(() => validateSession(proposed, selected)).toThrow();
+    proposed.teams.a.activeCaptureId = 'second-2';
+    const started = await service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 0,
+      session: proposed,
+      processedCommandIds: [],
+    });
+    expect(started.session.teams.a.activeCaptureId).toBe('second-2');
+    await expect(
+      service.lead(actors[1], {
+        ...payload,
+        expectedRevision: started.revision,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PHASE' });
+  });
+  it('applies human levels during Trainer combat and finalizes the same levels plus badge/TM cash bundle once', async () => {
+    const { battle: readyBattle, wallets } = await featureBattle();
+    let battle = await service.checkpoint(actors[1], {
+      battleId: readyBattle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 0,
+      session: immediateSession(readyBattle),
+      processedCommandIds: [],
+    });
+    const first = clone(battle.session);
+    first.runtime.serial++;
+    fixtureDefeat(first, 'a', 'b');
+    fixtureLevel(first.teams.a.pokemons[0], 21);
+    first.teams.a.pokemons[0].moves[0].currentPp = 34;
+    first.rewards.appliedCount = 1;
+    battle = await service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 1,
+      session: first,
+      processedCommandIds: [],
+    });
+    expect(battle.session.teams.a.pokemons[0].pokemon.level).toBe(21);
+    expect(battle.players.a.snapshot.pokemons[0].pokemon.level).toBe(20);
+    expect(battle.results).toBeUndefined();
+    for (const mutate of [
+      (input: any) => {
+        input.rewards.appliedCount = 0;
+      },
+      (input: any) => {
+        fixtureLevel(input.teams.a.pokemons[0], 22);
+      },
+      (input: any) => {
+        fixtureLevel(input.teams.b.pokemons[0], 13);
+      },
+      (input: any) => {
+        input.rewards.eligibleSides = ['a', 'b'];
+      },
+    ]) {
+      const invalid = clone(battle.session);
+      mutate(invalid);
+      expect(() => validateSession(invalid, battle)).toThrow();
+    }
+    const final = clone(battle.session);
+    final.runtime.serial++;
+    fixtureDefeat(final, 'a', 'b', 1);
+    expect(final.rewards.defeats[1].winnerLevel).toBe(21);
+    fixtureLevel(final.teams.a.pokemons[0], 22);
+    final.rewards.appliedCount = 2;
+    final.phase = 'finished';
+    final.runtime.ended = true;
+    final.runtime.winner = 'a';
+    battle = await service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 2,
+      session: final,
+      processedCommandIds: [],
+    });
+    const done = await service.finalize(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+    });
+    expect(done.results.a.patches[0]).toMatchObject({
+      level: 22,
+      hp: 75,
+      movesPp: [{ moveId: 1, currentPp: 34 }],
+    });
+    expect(await wallets.get(2)).toMatchObject({
+      balance: 1700,
+      badges: ['boulder'],
+      items: { tm: 1 },
+    });
+    await service.finalize(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+    });
+    expect((await wallets.get(2)).items.tm).toBe(1);
+  });
+  it('validates double-KO rewards against pre-batch levels and advances both human levels while preserving zero HP', async () => {
+    const { battle: readyBattle, wallets } = await featureBattle(false);
+    let battle = await service.checkpoint(actors[1], {
+      battleId: readyBattle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 0,
+      session: immediateSession(readyBattle),
+      processedCommandIds: [],
+    });
+    const final = clone(battle.session);
+    final.runtime.serial++;
+    fixtureDefeat(final, 'a', 'b');
+    fixtureDefeat(final, 'b', 'a');
+    expect(
+      final.rewards.defeats.map((entry: any) => entry.winnerLevel),
+    ).toEqual([20, 20]);
+    for (const side of ['a', 'b'])
+      fixtureLevel(final.teams[side].pokemons[0], 21);
+    final.rewards.appliedCount = 2;
+    final.phase = 'finished';
+    final.runtime.ended = true;
+    final.runtime.winner = 'draw';
+    battle = await service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 1,
+      session: final,
+      processedCommandIds: [],
+    });
+    const done = await service.finalize(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+    });
+    for (const side of ['a', 'b'])
+      expect(done.results[side].patches[0]).toMatchObject({ level: 21, hp: 0 });
+    expect((await wallets.get(2)).balance).toBe(500);
+    expect((await wallets.get(3)).balance).toBe(500);
+  });
   it('awards deferred levels with proportional HP and pays the winning Trainer preset exactly once', async () => {
     const { battle, wallets } = await rewardBattle();
     expect(battle.session.teams.a.pokemons[0].pokemon.level).toBe(20);

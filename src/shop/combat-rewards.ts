@@ -8,6 +8,18 @@ export const LOCAL_TRAINER_REWARDS = {
 } as const;
 
 export type TrainerRewardColor = keyof typeof LOCAL_TRAINER_REWARDS;
+export const GYM_REWARD_BADGES = {
+  'kanto-brock': 'boulder',
+  'kanto-misty': 'cascade',
+  'kanto-surge': 'thunder',
+  'kanto-erika': 'rainbow',
+  'kanto-koga': 'soul',
+  'kanto-sabrina': 'marsh',
+  'kanto-blaine': 'volcano',
+  'kanto-giovanni': 'earth',
+} as const;
+export type GymBadgeId =
+  (typeof GYM_REWARD_BADGES)[keyof typeof GYM_REWARD_BADGES];
 export type LocalTrainerRewardClaim = {
   encounterId: string;
   epoch: number;
@@ -26,6 +38,10 @@ export type CombatReward = {
   walletRevision: number;
   status: 'credited' | 'rejected';
   reason?: 'STALE_GAME';
+  /** Absent on historical cash-only receipts; never infer or upgrade these. */
+  rewardBundleVersion?: 1;
+  badgeId?: GymBadgeId;
+  items?: { tm: 1 };
 };
 export type StoredCombatReward = CombatReward & { requestHash: string };
 

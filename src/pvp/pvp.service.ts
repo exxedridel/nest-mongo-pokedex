@@ -241,6 +241,7 @@ export class PvpService implements OnModuleInit {
         pending.battleId,
         pending.presetId,
         pending.epoch,
+        pending.rewardBundleVersion,
       );
       const previous = battle.revision;
       const next = clone(battle);
@@ -443,6 +444,25 @@ export class PvpService implements OnModuleInit {
       },
       players,
       applied: clone(battle.applied),
+      ...(battle.levelRewards ? { levelRewards: battle.levelRewards } : {}),
+      ...(battle.rewardBundleVersion
+        ? { rewardBundleVersion: battle.rewardBundleVersion }
+        : {}),
+      ...(battle.leads
+        ? {
+            leads: admin
+              ? clone(battle.leads)
+              : Object.fromEntries(
+                  humanSides(battle)
+                    .filter(
+                      (side) =>
+                        battle.players[side].user.id === actor.user.id &&
+                        battle.leads[side],
+                    )
+                    .map((side) => [side, battle.leads[side]]),
+                ),
+          }
+        : {}),
     };
     if (battle.mode === 'trainer') {
       state.mode = 'trainer';
@@ -498,10 +518,30 @@ export class PvpService implements OnModuleInit {
     return this.createExclusive(actor, payload);
   }
   private async createExclusive(actor: Actor, payload: any) {
-    object(payload, ['commandId', 'playerAId', 'playerBId', 'trainerPresetId']);
+    object(payload, [
+      'commandId',
+      'playerAId',
+      'playerBId',
+      'trainerPresetId',
+      'levelRewards',
+      'rewardBundleVersion',
+    ]);
     id(payload.commandId);
     integer(payload.playerAId, 1);
     const isTrainer = payload.trainerPresetId !== undefined;
+    if (
+      payload.levelRewards !== undefined &&
+      payload.levelRewards !== 'immediate'
+    )
+      fail('INVALID_INPUT', 'El modo de progresión no es válido.');
+    if (
+      payload.rewardBundleVersion !== undefined &&
+      (payload.rewardBundleVersion !== 1 || !isTrainer)
+    )
+      fail(
+        'INVALID_INPUT',
+        'La recompensa de gimnasio requiere un Trainer compatible.',
+      );
     const trainer = isTrainer
       ? trainerPreset(payload.trainerPresetId)
       : undefined;
@@ -516,10 +556,24 @@ export class PvpService implements OnModuleInit {
     if (payload.playerAId === payload.playerBId)
       fail('INVALID_PLAYERS', 'Selecciona dos jugadores distintos.');
     const creationKey = digest([actor.user.id, payload.commandId]);
+    const selection = isTrainer
+      ? ['trainer', payload.playerAId, trainer.presetId]
+      : [payload.playerAId, payload.playerBId];
     const creationHash = digest(
-      isTrainer
-        ? ['trainer', payload.playerAId, trainer.presetId]
-        : [payload.playerAId, payload.playerBId],
+      payload.levelRewards !== undefined ||
+        payload.rewardBundleVersion !== undefined
+        ? [
+            ...selection,
+            {
+              ...(payload.levelRewards
+                ? { levelRewards: payload.levelRewards }
+                : {}),
+              ...(payload.rewardBundleVersion
+                ? { rewardBundleVersion: payload.rewardBundleVersion }
+                : {}),
+            },
+          ]
+        : selection,
     );
     const replay = await this.repository.byCreationKey(creationKey);
     if (replay) {
@@ -550,6 +604,10 @@ export class PvpService implements OnModuleInit {
     }
     const battle: Battle = {
       battleId: randomUUID(),
+      ...(payload.levelRewards ? { levelRewards: payload.levelRewards } : {}),
+      ...(payload.rewardBundleVersion
+        ? { rewardBundleVersion: payload.rewardBundleVersion }
+        : {}),
       ...(isTrainer ? { mode: 'trainer' as const, trainer } : {}),
       creationKey,
       creationHash,
@@ -641,6 +699,52 @@ export class PvpService implements OnModuleInit {
     return this.activity
       ? this.activity.runExclusive([actor.user.id], save)
       : save();
+  }
+  async lead(actor: Actor, payload: any) {
+    object(payload, [
+      'battleId',
+      'hostEpoch',
+      'side',
+      'captureId',
+      'expectedRevision',
+    ]);
+    integer(payload.hostEpoch, 1);
+    integer(payload.expectedRevision);
+    id(payload.captureId);
+    if (!SIDES.includes(payload.side))
+      fail('INVALID_LEAD', 'El equipo seleccionado no es válido.');
+    return this.mutate(payload.battleId, actor, async (battle) => {
+      this.host(battle, actor, payload.hostEpoch);
+      if (battle.phase !== 'ready' || battle.session?.runtime)
+        fail(
+          'INVALID_PHASE',
+          'Selecciona el Pokémon inicial antes de comenzar el combate.',
+        );
+      if (!humanSides(battle).includes(payload.side))
+        fail(
+          'INVALID_LEAD',
+          'Sólo se selecciona el Pokémon inicial del jugador.',
+        );
+      const capture = battle.players[payload.side].snapshot?.pokemons.find(
+        (mon) => mon.captureId === payload.captureId,
+      );
+      if (!capture || hp(capture) <= 0)
+        fail(
+          'INVALID_LEAD',
+          'El Pokémon inicial debe pertenecer al equipo y estar vivo.',
+        );
+      if (battle.leads?.[payload.side] === payload.captureId) return false;
+      if (battle.revision !== payload.expectedRevision)
+        fail(
+          'REVISION_CONFLICT',
+          'La selección cambió. Sincroniza antes de elegir de nuevo.',
+        );
+      await this.ownersOnline(battle);
+      this.host(battle, actor, payload.hostEpoch);
+      (battle.leads ??= {})[payload.side] = payload.captureId;
+      if (battle.session)
+        battle.session.teams[payload.side].activeCaptureId = payload.captureId;
+    });
   }
   async claim(actor: Actor, payload: any) {
     object(payload, ['battleId']);
@@ -945,15 +1049,19 @@ export class PvpService implements OnModuleInit {
                     entry.winnerCaptureId === original.captureId,
                 )
                 .reduce((sum: number, entry: any) => sum + entry.levels, 0);
-              const level = Math.min(100, original.pokemon.level + gained);
+              const immediate = battle.levelRewards === 'immediate';
+              const level = immediate
+                ? mon.pokemon.level
+                : Math.min(100, original.pokemon.level + gained);
               const leveled = level > original.pokemon.level;
-              const finalHp = leveled
-                ? Math.floor(
-                    (hp(mon) *
-                      maxHp({ ...mon, pokemon: { ...mon.pokemon, level } })) /
-                      maxHp(mon),
-                  )
-                : hp(mon);
+              const finalHp =
+                leveled && !immediate
+                  ? Math.floor(
+                      (hp(mon) *
+                        maxHp({ ...mon, pokemon: { ...mon.pokemon, level } })) /
+                        maxHp(mon),
+                    )
+                  : hp(mon);
               return {
                 captureId: original.captureId,
                 hp: finalHp,
@@ -997,6 +1105,9 @@ export class PvpService implements OnModuleInit {
               epoch: await this.shop.battleRewardEpoch(
                 battle.players.a.user.id,
               ),
+              ...(battle.rewardBundleVersion === 1
+                ? { rewardBundleVersion: 1 as const }
+                : {}),
             },
           ];
         }

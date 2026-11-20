@@ -6,6 +6,7 @@ import {
   Capture,
   Choice,
   fail,
+  humanSides,
   SIDES,
   Side,
   Snapshot,
@@ -405,6 +406,26 @@ function staticCapture(value: Capture) {
   );
   return output;
 }
+function rewardedCapture(original: Capture, level: number): Capture {
+  if (level === original.pokemon.level) return original;
+  const output = structuredClone(original);
+  output.pokemon.level = level;
+  output.pokemon.stats = STATS.map((name) => {
+    const base = output.pokemon.baseStats.find(
+      (stat: any) => stat.name === name,
+    ).value;
+    const calculated =
+      Math.floor((base * level) / 50) + (name === 'hp' ? level + 10 : 5);
+    return {
+      name,
+      value:
+        name === 'hp'
+          ? Math.floor(calculated * (output.pokemon.hpMultiplier ?? 1.3))
+          : calculated,
+    };
+  });
+  return output;
+}
 export function validateSession(session: any, battle: Battle) {
   object(session, [
     'version',
@@ -438,6 +459,28 @@ export function validateSession(session: any, battle: Battle) {
     session.hpMultiplier > 2
   )
     fail('INVALID_CHECKPOINT', 'Multiplicador de sesión no válido.');
+  const immediate = battle.levelRewards === 'immediate';
+  if (immediate) {
+    object(session.rewards, [
+      'version',
+      'defeats',
+      'timing',
+      'eligibleSides',
+      'appliedCount',
+    ]);
+    if (
+      session.rewards.version !== 1 ||
+      session.rewards.timing !== 'immediate' ||
+      stableJson(session.rewards.eligibleSides) !==
+        stableJson(humanSides(battle)) ||
+      !Array.isArray(session.rewards.defeats) ||
+      session.rewards.appliedCount !== session.rewards.defeats.length
+    )
+      fail(
+        'INVALID_CHECKPOINT',
+        'La progresión inmediata no coincide con la batalla.',
+      );
+  }
   object(session.teams, SIDES);
   for (const side of SIDES) {
     const team = session.teams[side];
@@ -462,9 +505,29 @@ export function validateSession(session: any, battle: Battle) {
       const before = original.pokemons.find(
         (entry) => entry.captureId === mon.captureId,
       );
+      const expectedLevel =
+        immediate && !npc
+          ? Math.min(
+              100,
+              (before?.pokemon.level ?? 1) +
+                session.rewards.defeats.reduce(
+                  (sum: number, entry: any) =>
+                    sum +
+                    (entry?.winnerSide === side &&
+                    entry?.winnerCaptureId === mon.captureId &&
+                    Number.isSafeInteger(entry?.levels)
+                      ? entry.levels
+                      : 0),
+                  0,
+                ),
+            )
+          : before?.pokemon.level;
+      const expected = before
+        ? rewardedCapture(before, expectedLevel)
+        : undefined;
       if (
         !before ||
-        stableJson(staticCapture(mon)) !== stableJson(staticCapture(before))
+        stableJson(staticCapture(mon)) !== stableJson(staticCapture(expected))
       )
         fail(
           'INVALID_CHECKPOINT',
@@ -510,6 +573,16 @@ export function validateSession(session: any, battle: Battle) {
         'INVALID_CHECKPOINT',
         'El Trainer debe iniciar con el primer Pokémon del preset.',
       );
+    if (
+      !npc &&
+      !battle.session?.runtime &&
+      team.activeCaptureId !==
+        (battle.leads?.[side] ?? original.activeCaptureId)
+    )
+      fail(
+        'INVALID_CHECKPOINT',
+        'El equipo debe iniciar con el Pokémon seleccionado.',
+      );
   }
   if (!Array.isArray(session.history) || session.history.length > 500)
     fail('INVALID_CHECKPOINT', 'Historial demasiado grande.');
@@ -520,7 +593,12 @@ export function validateSession(session: any, battle: Battle) {
       'Las recompensas registradas no pueden desaparecer.',
     );
   if (session.rewards !== undefined) {
-    object(session.rewards, ['version', 'defeats']);
+    object(
+      session.rewards,
+      immediate
+        ? ['version', 'defeats', 'timing', 'eligibleSides', 'appliedCount']
+        : ['version', 'defeats'],
+    );
     const defeats = session.rewards.defeats;
     const prior = previousRewards?.defeats ?? [];
     if (
@@ -566,11 +644,23 @@ export function validateSession(session: any, battle: Battle) {
       const defeated = session.teams[entry.defeatedSide].pokemons.find(
         (mon: any) => mon.captureId === entry.defeatedCaptureId,
       );
+      const winnerBefore = battle.session?.teams?.[
+        entry.winnerSide
+      ]?.pokemons.find((mon: any) => mon.captureId === entry.winnerCaptureId);
+      const defeatedBefore = battle.session?.teams?.[
+        entry.defeatedSide
+      ]?.pokemons.find((mon: any) => mon.captureId === entry.defeatedCaptureId);
+      const validateLevels = !immediate || index >= prior.length;
       if (
         !winner ||
         !defeated ||
-        winner.pokemon.level !== entry.winnerLevel ||
-        defeated.pokemon.level !== entry.defeatedLevel ||
+        (validateLevels &&
+          (immediate ? winnerBefore?.pokemon.level : winner.pokemon.level) !==
+            entry.winnerLevel) ||
+        (validateLevels &&
+          (immediate
+            ? defeatedBefore?.pokemon.level
+            : defeated.pokemon.level) !== entry.defeatedLevel) ||
         entry.levels !== (entry.defeatedLevel > entry.winnerLevel ? 2 : 1)
       )
         fail(

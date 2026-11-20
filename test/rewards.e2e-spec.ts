@@ -4,6 +4,7 @@ import { MemoryShopRepository } from '../src/shop/shop.repository';
 import { ShopService } from '../src/shop/shop.service';
 import {
   LOCAL_TRAINER_REWARDS,
+  GYM_REWARD_BADGES,
   trainerPresetReward,
 } from '../src/shop/combat-rewards';
 
@@ -209,4 +210,96 @@ describe('Automatic combat rewards in the authoritative wallet', () => {
   ])('keeps the exact %s preset amount', (preset, amount) =>
     expect(trainerPresetReward(preset as string)).toBe(amount),
   );
+  it.each(Object.entries(GYM_REWARD_BADGES))(
+    'grants %s cash, one TM and its unique badge atomically on every new victory',
+    async (presetId, badgeId) => {
+      const first = await service.creditBattleReward(
+        2,
+        'gym-win-one',
+        presetId,
+        0,
+        1,
+      );
+      expect(first).toMatchObject({
+        rewardBundleVersion: 1,
+        badgeId,
+        items: { tm: 1 },
+        amount: trainerPresetReward(presetId),
+      });
+      expect(
+        await service.creditBattleReward(2, 'gym-win-one', presetId, 0, 1),
+      ).toEqual(first);
+      expect((await repository.get(2)).items.tm).toBe(1);
+      await service.creditBattleReward(2, 'gym-win-two', presetId, 0, 1);
+      const row = await repository.get(2);
+      expect(row.badges).toEqual([badgeId]);
+      expect(row.items.tm).toBe(2);
+      expect(row.balance).toBe(500 + trainerPresetReward(presetId) * 2);
+      expect(row.rewards).toHaveLength(2);
+    },
+  );
+  it('never upgrades old cash-only receipts and emits no gym extras for the Elite Four or rival', async () => {
+    const old = await service.creditBattleReward(
+      2,
+      'old-win',
+      'kanto-brock',
+      0,
+    );
+    expect(old).not.toHaveProperty('items');
+    expect(
+      await service.creditBattleReward(2, 'old-win', 'kanto-brock', 0),
+    ).toEqual(old);
+    await expect(
+      service.creditBattleReward(2, 'old-win', 'kanto-brock', 0, 1),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+    for (const presetId of [
+      'kanto-lorelei',
+      'kanto-rival-lab-grass',
+      'kanto-rival-champion-water',
+    ]) {
+      const receipt = await service.creditBattleReward(
+        2,
+        presetId,
+        presetId,
+        0,
+        1,
+      );
+      expect(receipt.rewardBundleVersion).toBe(1);
+      expect(receipt).not.toHaveProperty('badgeId');
+      expect(receipt).not.toHaveProperty('items');
+    }
+    const row = await repository.get(2);
+    expect(row.badges).toBeUndefined();
+    expect(row.items.tm).toBeUndefined();
+  });
+  it('clears canonical badges on reset and rejects stale gym bundles without any item or badge grants', async () => {
+    await service.creditBattleReward(2, 'gym-win', 'kanto-brock', 0, 1);
+    const reset = await service.reset(player, {
+      requestId: 'reset-badges',
+      expectedWalletRevision: 1,
+    });
+    expect(reset.wallet).toMatchObject({
+      balance: 500,
+      badges: [],
+      items: {},
+      rewardEpoch: 1,
+    });
+    const rejected = await service.creditBattleReward(
+      2,
+      'stale-gym-win',
+      'kanto-misty',
+      0,
+      1,
+    );
+    expect(rejected).toMatchObject({
+      rewardBundleVersion: 1,
+      status: 'rejected',
+      reason: 'STALE_GAME',
+      amount: 0,
+    });
+    expect(rejected).not.toHaveProperty('items');
+    expect(rejected).not.toHaveProperty('badgeId');
+    expect((await repository.get(2)).badges).toEqual([]);
+    expect((await repository.get(2)).items.tm).toBeUndefined();
+  });
 });

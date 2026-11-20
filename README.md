@@ -7,23 +7,31 @@ de dos correos. Las batallas y la Tienda usan los namespaces descritos abajo.
 
 ## Recompensas automáticas de combate
 
-React2.13.0 registra niveles por KO/captura y los aplica al guardar el resultado.
-La sesión administrativa añade un ledger opcional de derrotas; Nest valida los
-checkpoints y genera nivel/HP final en los patches, conservando resultados legacy.
-El motor permanece en React.
+React2.14.0 permite niveles durante nuevas batallas administrativas. Create
+declara `levelRewards:'immediate'`; el ledger marca el lote aplicado y Nest
+valida nivel/estadísticas según los KO, sin duplicarlos en el resultado final.
+Las sesiones antiguas conservan su progreso diferido. El motor permanece en React.
+
+`pvp:lead` guarda el Pokémon inicial humano vivo en fase ready, con anfitrión y
+expectedRevision vigentes. No cambia snapshot/hash/orden y el inicio debe usar
+el seleccionado. La selección del rival se mantiene privada para los jugadores.
 
 `shop:reward-claim {rewards:[{encounterId,epoch,color}]}` acredita premios de
 Trainer local: rosa200, verde300, azul400, amarilla500 y roja600PD; dorada0.
 El importe se calcula aquí. El ledger de cartera guarda crédito+recibo en un CAS,
 deduplicado por cuenta/encuentro. El jugador reintenta sin bloquear el juego.
 Los premios administrativos de los presets Kanto nacen del resultado guardado
-y usan un outbox recuperable por battleId. JcJ, huida, rendición y empate no pagan.
+y usan un outbox recuperable por battleId. Nuevos Trainer con
+`rewardBundleVersion:1` entregan también TM +1 y medalla única del gimnasio en
+el mismo CAS; `Wallet.badges` publica esas medallas. Elite/rival no reciben esos
+extras. Los recibos anteriores no se modifican ni se conceden extras al repetirlos.
+JcJ, huida, rendición y empate no pagan.
 
 `Wallet.rewardEpoch` opcional en documentos anteriores parte de0 y sube al
 reiniciar. Premios de generaciones anteriores terminan con STALE_GAME sin cobro.
 No se borran carteras, partidas ni recibos. Ver
 [BATTLE_REWARDS_PROTOCOL.md](../BATTLE_REWARDS_PROTOCOL.md).
-Desplegar Nest antes de React y recargar a2.13.0; sin nuevas variables ni MySQL.
+Desplegar Nest antes de React y recargar a2.14.0; sin nuevas variables ni MySQL.
 
 ## Consumo en segundo plano: namespace `/shop`
 

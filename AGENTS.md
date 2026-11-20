@@ -1,5 +1,16 @@
 # Contexto de la trilogia Pokemon
 
+Etapa actual2026-11-19 React2.14.0/Nest TERMINADA LOCAL. Newcreateoptin
+levelRewardsimmediate+TrainerrewardBundleVersion1, oldflagsabsentlegacyintacto.
+ValidateSessionstats/nivel exactos porledgerKOanteslote/appliedCount; NPCnoprogresa,
+finalabsnorelevel. pvp:lead livinghuman/ready/noRuntime/host/expectedRevision,
+idempotenciamismaselección, snapshot/hashintacto yprivacyownside. Gymbundlev1
+PD+TM1+badgeúnica mismoCAS; repeatvictoryotraTM/replaynada/oldreceiptnoextras;
+STALE_GAMEamount0sinitemsbadge, resetWalletbadges[].228Shop63PvP/buildPASS;
+ReactTS/build yChromeRewards5+ShopCOMPLETOPASSsinJSerrors/cleanup. Ver memoria/
+BATTLE_REWARDS_PROTOCOL. Nest→Reactrecargar2.14.0 sinvars/MySQL/seed/reset/
+borrados/commit/push/despliegue; producciónnoverificada.
+
 Etapa actual2026-11-17 React2.13.0/Nest: recompensasautomáticasterminadaslocal.
 shop:reward-claim BGlotes idempotentes cuenta+encounter/epoch/color, dineroCAS+
 recibo; Wallet.rewardEpoch subereset ySTALE_GAMEterminal0. pink200green300blue400

@@ -1,6 +1,10 @@
 import { Actor } from '../pvp/pvp.types';
 import { UserPublic } from '../messages/messages.types';
-import type { CombatReward, StoredCombatReward } from './combat-rewards';
+import type {
+  CombatReward,
+  GymBadgeId,
+  StoredCombatReward,
+} from './combat-rewards';
 
 export const SHOP_CATALOG = {
   'poke-ball': 150,
@@ -123,6 +127,7 @@ export type Wallet = {
   consumptionAck?: ConsumptionAck;
   /** Missing only on snapshots predating automatic combat rewards. */
   rewardEpoch?: number;
+  badges?: GymBadgeId[];
 };
 export type Purchase = {
   /** Absent for purchases, including genuine purchases priced at zero. */
@@ -263,6 +268,7 @@ export function walletView(record: WalletRecord, clientId?: string): Wallet {
   return clone({
     userId: record.userId,
     rewardEpoch: record.rewardEpoch ?? 0,
+    badges: record.badges ?? [],
     balance: record.balance,
     revision: record.revision,
     items: record.items,

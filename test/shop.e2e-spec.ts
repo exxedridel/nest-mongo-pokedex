@@ -1561,6 +1561,7 @@ describe('Full Restore local inventory use', () => {
       expect(used.wallet).toEqual({
         userId: 2,
         rewardEpoch: 0,
+        badges: [],
         balance: before.balance,
         currencyVersion: 1,
         revision: 1,

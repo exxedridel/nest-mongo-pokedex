@@ -186,6 +186,8 @@ export class PvpGateway
         battle = await this.service.create(actor, payload);
       else if (operation === 'snapshot')
         battle = await this.service.snapshot(actor, payload);
+      else if (operation === 'lead')
+        battle = await this.service.lead(actor, payload);
       else if (operation === 'claim')
         battle = await this.service.claim(actor, payload);
       else if (operation === 'command')
@@ -233,6 +235,12 @@ export class PvpGateway
     @MessageBody() payload: any,
   ) {
     return this.run(socket, 'claim', payload);
+  }
+  @SubscribeMessage('pvp:lead') lead(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: any,
+  ) {
+    return this.run(socket, 'lead', payload);
   }
   @SubscribeMessage('pvp:command') command(
     @ConnectedSocket() socket: Socket,

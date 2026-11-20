@@ -9,6 +9,7 @@ import { ShopCatalogService } from './shop-catalog.service';
 import { MemoryShopCatalogRepository } from './shop-catalog.repository';
 import {
   CombatReward,
+  GYM_REWARD_BADGES,
   LOCAL_TRAINER_REWARDS,
   LocalTrainerRewardClaim,
   trainerPresetReward,
@@ -2215,12 +2216,31 @@ export class ShopService implements OnModuleInit {
             'WALLET_CONFLICT',
             'El saldo o la revisión está fuera de rango.',
           );
-        if (!stale && request.amount > 0) {
+        if (
+          !stale &&
+          request.items &&
+          !Number.isSafeInteger((row.items.tm ?? 0) + request.items.tm)
+        )
+          fail(
+            'WALLET_CONFLICT',
+            'Las existencias de TM están fuera de rango.',
+          );
+        if (
+          !stale &&
+          (request.amount > 0 || request.items || request.badgeId)
+        ) {
           row.balance += request.amount;
+          if (request.items)
+            row.items.tm = (row.items.tm ?? 0) + request.items.tm;
+          if (request.badgeId && !row.badges?.includes(request.badgeId))
+            (row.badges ??= []).push(request.badgeId);
           row.revision++;
         }
+        const { badgeId, items, ...visibleRequest } = request;
         const receipt: CombatReward = {
-          ...request,
+          ...visibleRequest,
+          ...(!stale && badgeId ? { badgeId } : {}),
+          ...(!stale && items ? { items } : {}),
           amount: stale ? 0 : request.amount,
           status: stale ? 'rejected' : 'credited',
           ...(stale ? { reason: 'STALE_GAME' as const } : {}),
@@ -2252,12 +2272,20 @@ export class ShopService implements OnModuleInit {
     battleId: string,
     presetId: string,
     epoch: number,
+    rewardBundleVersion?: 1,
   ): Promise<CombatReward> {
     const amount = trainerPresetReward(presetId);
     if (amount === undefined)
       fail('INVALID_TRAINER', 'No existe recompensa para este Trainer.');
     id(battleId);
     integer(epoch);
+    if (rewardBundleVersion !== undefined && rewardBundleVersion !== 1)
+      fail('INVALID_INPUT', 'La versión de recompensa no es válida.');
+    const badgeId =
+      rewardBundleVersion === 1 &&
+      Object.prototype.hasOwnProperty.call(GYM_REWARD_BADGES, presetId)
+        ? GYM_REWARD_BADGES[presetId as keyof typeof GYM_REWARD_BADGES]
+        : undefined;
     return this.activity.runExclusive(
       [userId],
       async () =>
@@ -2271,6 +2299,8 @@ export class ShopService implements OnModuleInit {
               presetId,
               epoch,
               amount,
+              ...(rewardBundleVersion === 1 ? { rewardBundleVersion } : {}),
+              ...(badgeId ? { badgeId, items: { tm: 1 as const } } : {}),
             },
           ])
         )[0],
@@ -2787,6 +2817,7 @@ export class ShopService implements OnModuleInit {
               'La generación de la partida está fuera de rango.',
             );
           row.rewardEpoch = (row.rewardEpoch ?? 0) + 1;
+          row.badges = [];
           row.revision++;
           row.storageRevision++;
           (row.resets ??= []).push({ ...receipt, requestHash });

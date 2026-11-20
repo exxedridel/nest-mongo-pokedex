@@ -35,6 +35,7 @@ export const ShopWalletSchema = new Schema(
     battleUses: { type: [Schema.Types.Mixed], default: [] },
     rewardEpoch: { type: Number, default: undefined },
     rewards: { type: [Schema.Types.Mixed], default: undefined },
+    badges: { type: [String], default: undefined },
   },
   {
     collection: 'shop_wallets',
