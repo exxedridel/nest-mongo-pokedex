@@ -11,8 +11,10 @@ import {
   CombatReward,
   GYM_REWARD_BADGES,
   LOCAL_TRAINER_REWARDS,
+  LOCAL_TRAINER_PENALTIES,
   LocalTrainerRewardClaim,
   trainerPresetReward,
+  trainerPresetPenalty,
 } from './combat-rewards';
 import {
   clone,
@@ -2179,12 +2181,48 @@ export class ShopService implements OnModuleInit {
       const receipts: CombatReward[] = [];
       let changed = false;
       for (const request of requested) {
-        const requestHash = digest(['combat-reward-v1', request]);
+        const penalty = request.penaltyVersion === 1;
+        const nominalAmount = penalty ? Number(request.nominalAmount) : 0;
+        if (
+          penalty &&
+          (!Number.isSafeInteger(nominalAmount) ||
+            nominalAmount < 0 ||
+            request.amount !== nominalAmount ||
+            request.rewardBundleVersion !== undefined ||
+            request.items ||
+            request.badgeId)
+        )
+          fail(
+            'INVALID_INPUT',
+            'La penalización debe conservar su tarifa y no incluir premios.',
+          );
+        // The hash binds the fixed intent and nominal tariff, never the current
+        // balance or actual clamped debit. Historical win hashes stay unchanged.
+        const requestHash = digest([
+          penalty ? 'combat-penalty-v1' : 'combat-reward-v1',
+          request,
+        ]);
         const prior = (row.rewards ?? []).find(
           (entry) => entry.rewardId === request.rewardId,
         );
         if (prior) {
-          if (prior.requestHash !== requestHash)
+          const sameSubject = (entry: CombatReward) =>
+            digest([
+              entry.rewardId,
+              entry.userId,
+              entry.source,
+              entry.encounterId ?? null,
+              entry.battleId ?? null,
+              entry.epoch,
+              entry.color ?? null,
+              entry.presetId ?? null,
+            ]);
+          const contraryOutcome = (prior.penaltyVersion === 1) !== penalty;
+          if (
+            prior.requestHash !== requestHash &&
+            (!contraryOutcome ||
+              sameSubject(prior) !== sameSubject(request as CombatReward))
+          )
             fail(
               'REQUEST_CONFLICT',
               'Esta recompensa ya corresponde a otro encuentro.',
@@ -2199,6 +2237,12 @@ export class ShopService implements OnModuleInit {
             'El historial de recompensas requiere mantenimiento.',
           );
         const stale = request.epoch !== (row.rewardEpoch ?? 0);
+        const balanceBefore = row.balance;
+        const amount = stale
+          ? 0
+          : penalty
+            ? Math.min(row.balance, nominalAmount)
+            : request.amount;
         if (
           !stale &&
           (await this.activity.busyUsers([userId], ['shop'])).length
@@ -2209,7 +2253,7 @@ export class ShopService implements OnModuleInit {
           );
         if (
           !stale &&
-          (!Number.isSafeInteger(row.balance + request.amount) ||
+          (!Number.isSafeInteger(row.balance + (penalty ? -amount : amount)) ||
             !Number.isSafeInteger(row.revision + 1))
         )
           fail(
@@ -2225,11 +2269,8 @@ export class ShopService implements OnModuleInit {
             'WALLET_CONFLICT',
             'Las existencias de TM están fuera de rango.',
           );
-        if (
-          !stale &&
-          (request.amount > 0 || request.items || request.badgeId)
-        ) {
-          row.balance += request.amount;
+        if (!stale && (amount > 0 || request.items || request.badgeId)) {
+          row.balance += penalty ? -amount : amount;
           if (request.items)
             row.items.tm = (row.items.tm ?? 0) + request.items.tm;
           if (request.badgeId && !row.badges?.includes(request.badgeId))
@@ -2241,8 +2282,9 @@ export class ShopService implements OnModuleInit {
           ...visibleRequest,
           ...(!stale && badgeId ? { badgeId } : {}),
           ...(!stale && items ? { items } : {}),
-          amount: stale ? 0 : request.amount,
-          status: stale ? 'rejected' : 'credited',
+          amount,
+          status: stale ? 'rejected' : penalty ? 'debited' : 'credited',
+          ...(penalty ? { balanceBefore, balanceAfter: row.balance } : {}),
           ...(stale ? { reason: 'STALE_GAME' as const } : {}),
           walletRevision: row.revision,
         };
@@ -2307,6 +2349,40 @@ export class ShopService implements OnModuleInit {
     );
   }
 
+  /** Internal only: the persisted admin battle decides a trainer loss/forfeit. */
+  async debitBattlePenalty(
+    userId: number,
+    battleId: string,
+    presetId: string,
+    epoch: number,
+  ): Promise<CombatReward> {
+    const nominalAmount = trainerPresetPenalty(presetId);
+    if (nominalAmount === undefined)
+      fail('INVALID_TRAINER', 'No existe penalización para este Trainer.');
+    integer(userId, 1);
+    id(battleId);
+    integer(epoch);
+    return this.activity.runExclusive(
+      [userId],
+      async () =>
+        (
+          await this.commitCombatRewards(userId, [
+            {
+              rewardId: `admin:${battleId}`,
+              userId,
+              source: 'admin-trainer',
+              battleId,
+              presetId,
+              epoch,
+              penaltyVersion: 1,
+              nominalAmount,
+              amount: nominalAmount,
+            },
+          ])
+        )[0],
+    );
+  }
+
   async rewardClaim(actor: Actor, payload: any): Promise<ShopState> {
     object(payload, ['rewards']);
     if (
@@ -2316,9 +2392,11 @@ export class ShopService implements OnModuleInit {
     )
       fail('INVALID_INPUT', 'Envía de una a cien recompensas pendientes.');
     for (const claim of payload.rewards) {
-      object(claim, ['encounterId', 'epoch', 'color']);
+      object(claim, ['encounterId', 'epoch', 'color', 'penaltyVersion']);
       id(claim.encounterId);
       integer(claim.epoch);
+      if (claim.penaltyVersion !== undefined && claim.penaltyVersion !== 1)
+        fail('INVALID_INPUT', 'La versión de penalización no es válida.');
       if (
         !Object.prototype.hasOwnProperty.call(
           LOCAL_TRAINER_REWARDS,
@@ -2346,7 +2424,16 @@ export class ShopService implements OnModuleInit {
             encounterId: claim.encounterId,
             epoch: claim.epoch,
             color: claim.color,
-            amount: LOCAL_TRAINER_REWARDS[claim.color],
+            amount:
+              claim.penaltyVersion === 1
+                ? LOCAL_TRAINER_PENALTIES[claim.color]
+                : LOCAL_TRAINER_REWARDS[claim.color],
+            ...(claim.penaltyVersion === 1
+              ? {
+                  penaltyVersion: 1 as const,
+                  nominalAmount: LOCAL_TRAINER_PENALTIES[claim.color],
+                }
+              : {}),
           })),
         );
       },

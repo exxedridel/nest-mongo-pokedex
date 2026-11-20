@@ -27,11 +27,23 @@ el mismo CAS; `Wallet.badges` publica esas medallas. Elite/rival no reciben esos
 extras. Los recibos anteriores no se modifican ni se conceden extras al repetirlos.
 JcJ, huida, rendición y empate no pagan.
 
+React2.17.0 habilita penalizaciones con `rewards.lossPenaltyVersion:1` local y
+`pvp:create.lossPenaltyVersion:1` para Trainer administrativo. La misma RPC
+acepta claims `penaltyVersion:1`: rosa0, verde100, azul200, amarilla300, roja400PD.
+Presets: Brock50, Misty100, Surge200, Erika300, Koga/Sabrina400, Blaine/Giovanni/
+Elite Four/rival campeón500 y rival laboratorio50. Derrota y rendición cobran;
+empate, salvajes y JcJ quedan exentos. `min(saldo, tarifa)` impide deuda.
+El mismo ledger/CAS guarda cargo y recibo `debited` con importe nominal y real;
+reintentar devuelve el cargo original, incluso tras recibir dinero. Ganar y perder
+comparten ID: el primer resultado asentado prevalece. Los flags son opcionales,
+sin cargos retroactivos ni cambios de hashes antiguos. `pendingRewards` recupera
+también penalizaciones administrativas antes de liberar resultados.
+
 `Wallet.rewardEpoch` opcional en documentos anteriores parte de0 y sube al
 reiniciar. Premios de generaciones anteriores terminan con STALE_GAME sin cobro.
 No se borran carteras, partidas ni recibos. Ver
 [BATTLE_REWARDS_PROTOCOL.md](../BATTLE_REWARDS_PROTOCOL.md).
-Desplegar Nest antes de React y recargar a2.14.0; sin nuevas variables ni MySQL.
+Desplegar Nest antes de React y recargar a2.17.0; sin nuevas variables ni MySQL.
 
 ## Consumo en segundo plano: namespace `/shop`
 

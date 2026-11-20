@@ -90,6 +90,7 @@ export type Battle = {
   battleId: string;
   levelRewards?: 'immediate';
   rewardBundleVersion?: 1;
+  lossPenaltyVersion?: 1;
   leads?: Partial<Record<Side, string>>;
   mode?: 'trainer';
   trainer?: BattleTrainer;
@@ -144,6 +145,7 @@ export type Battle = {
     presetId: string;
     epoch: number;
     rewardBundleVersion?: 1;
+    penaltyVersion?: 1;
   }[];
 };
 export const humanSides = (battle: Battle): Side[] =>

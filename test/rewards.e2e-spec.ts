@@ -4,8 +4,10 @@ import { MemoryShopRepository } from '../src/shop/shop.repository';
 import { ShopService } from '../src/shop/shop.service';
 import {
   LOCAL_TRAINER_REWARDS,
+  LOCAL_TRAINER_PENALTIES,
   GYM_REWARD_BADGES,
   trainerPresetReward,
+  trainerPresetPenalty,
 } from '../src/shop/combat-rewards';
 
 describe('Automatic combat rewards in the authoritative wallet', () => {
@@ -15,6 +17,9 @@ describe('Automatic combat rewards in the authoritative wallet', () => {
   let player: Actor;
   const claim = (encounterId = 'encounter-1', color = 'pink', epoch = 0) => ({
     rewards: [{ encounterId, color, epoch }],
+  });
+  const penalty = (encounterId = 'loss-1', color = 'red', epoch = 0) => ({
+    rewards: [{ encounterId, color, epoch, penaltyVersion: 1 }],
   });
   beforeEach(async () => {
     player = {
@@ -302,4 +307,210 @@ describe('Automatic combat rewards in the authoritative wallet', () => {
     expect((await repository.get(2)).badges).toEqual([]);
     expect((await repository.get(2)).items.tm).toBeUndefined();
   });
+  it.each(Object.entries(LOCAL_TRAINER_PENALTIES))(
+    'settles a %s trainer defeat once with the exact server tariff, including free losses',
+    async (color, nominalAmount) => {
+      const first = await service.rewardClaim(player, penalty('defeat', color));
+      expect(first.rewards[0]).toMatchObject({
+        rewardId: 'local:defeat',
+        penaltyVersion: 1,
+        nominalAmount,
+        amount: nominalAmount,
+        status: 'debited',
+        balanceBefore: 500,
+        balanceAfter: 500 - nominalAmount,
+      });
+      expect(first.rewards[0]).not.toHaveProperty('badgeId');
+      expect(first.rewards[0]).not.toHaveProperty('items');
+      expect(first.wallet.balance).toBe(500 - nominalAmount);
+      expect(
+        (await service.rewardClaim(player, penalty('defeat', color))).rewards,
+      ).toEqual(first.rewards);
+      expect((await repository.get(2)).rewards).toHaveLength(1);
+      expect((await repository.get(2)).revision).toBe(
+        nominalAmount > 0 ? 1 : 0,
+      );
+    },
+  );
+  it.each([0, 75])(
+    'clamps a loss at zero from %s PD and never charges the missing remainder after later money arrives',
+    async (initialBalance) => {
+      const row = await repository.get(2);
+      row.balance = initialBalance;
+      row.storageRevision++;
+      await repository.compareAndSwap(row, 0);
+      const first = await service.rewardClaim(player, penalty());
+      expect(first.rewards[0]).toMatchObject({
+        nominalAmount: 400,
+        amount: initialBalance,
+        status: 'debited',
+        balanceBefore: initialBalance,
+        balanceAfter: 0,
+      });
+      expect(first.wallet.balance).toBe(0);
+      const later = await repository.get(2),
+        previous = later.storageRevision;
+      later.balance = 600;
+      later.revision++;
+      later.storageRevision++;
+      await repository.compareAndSwap(later, previous);
+      const replay = await service.rewardClaim(player, penalty());
+      expect(replay.rewards).toEqual(first.rewards);
+      expect(replay.wallet.balance).toBe(600);
+    },
+  );
+  it.each([true, false])(
+    'settles conflicting win/loss intents for one encounter only once (winFirst=%s)',
+    async (winFirst) => {
+      const win = claim('same-encounter', 'green'),
+        lose = penalty('same-encounter', 'green');
+      const first = await service.rewardClaim(player, winFirst ? win : lose);
+      const contrary = await service.rewardClaim(player, winFirst ? lose : win);
+      expect(contrary.rewards).toEqual(first.rewards);
+      expect(contrary.wallet.balance).toBe(winFirst ? 800 : 400);
+      const otherDevice = {
+        ...player,
+        clientId: 'loss-other-client',
+        socketId: 'loss-other-socket',
+      };
+      service.connect(otherDevice);
+      expect((await service.rewardClaim(otherDevice, lose)).rewards).toEqual(
+        first.rewards,
+      );
+      await expect(
+        service.rewardClaim(otherDevice, penalty('same-encounter', 'red')),
+      ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+      await expect(
+        service.rewardClaim(otherDevice, penalty('same-encounter', 'green', 1)),
+      ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+      expect((await repository.get(2)).rewards).toHaveLength(1);
+    },
+  );
+  it('serializes simultaneous contrary outcomes so their shared reward identity can never credit and debit', async () => {
+    const [first, second] = await Promise.all([
+      service.rewardClaim(player, claim('concurrent-outcomes', 'green')),
+      service.rewardClaim(player, penalty('concurrent-outcomes', 'green')),
+    ]);
+    expect(first.rewards).toEqual(second.rewards);
+    expect((await repository.get(2)).rewards).toHaveLength(1);
+    expect((await repository.get(2)).balance).toBe(
+      first.rewards[0].status === 'credited' ? 800 : 400,
+    );
+  });
+  it('rejects stale loss epochs terminally without changing the new balance or any saved items and badges', async () => {
+    const reset = await service.reset(player, {
+      requestId: 'loss-reset',
+      expectedWalletRevision: 0,
+    });
+    await service.resetApplied(player, {
+      requestId: 'loss-reset',
+      revision: reset.reset.walletRevision,
+    });
+    const rejected = await service.rewardClaim(
+      player,
+      penalty('old-offline-loss', 'red', 0),
+    );
+    expect(rejected.rewards[0]).toMatchObject({
+      penaltyVersion: 1,
+      nominalAmount: 400,
+      status: 'rejected',
+      reason: 'STALE_GAME',
+      amount: 0,
+    });
+    expect(rejected.wallet.balance).toBe(500);
+    const next = await service.rewardClaim(
+      player,
+      penalty('new-game-loss', 'red', 1),
+    );
+    expect(next.wallet.balance).toBe(100);
+    expect(
+      (await service.rewardClaim(player, penalty('old-offline-loss', 'red', 0)))
+        .wallet.balance,
+    ).toBe(100);
+  });
+  it('accepts no client amount or invalid penalty version and defers fresh debits while another central operation is pending', async () => {
+    for (const invalid of [0, 2, null, '1'])
+      await expect(
+        service.rewardClaim(player, {
+          rewards: [{ ...penalty().rewards[0], penaltyVersion: invalid }],
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    for (const key of ['amount', 'nominalAmount'])
+      await expect(
+        service.rewardClaim(player, {
+          rewards: [{ ...penalty().rewards[0], [key]: 1 }],
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    activity.register('shop', async () => [2]);
+    await expect(service.rewardClaim(player, penalty())).rejects.toMatchObject({
+      code: 'PLAYER_BUSY',
+    });
+    expect((await repository.get(2)).rewards).toBeUndefined();
+    activity.register('shop', async () => []);
+    expect((await service.rewardClaim(player, penalty())).wallet.balance).toBe(
+      100,
+    );
+  });
+  it('an administrative loss can never later turn into cash, a TM or a badge for the same battle', async () => {
+    const loss = await service.debitBattlePenalty(
+      2,
+      'one-battle',
+      'kanto-brock',
+      0,
+    );
+    expect(loss).toMatchObject({
+      penaltyVersion: 1,
+      nominalAmount: 50,
+      amount: 50,
+      status: 'debited',
+    });
+    expect(
+      await service.creditBattleReward(2, 'one-battle', 'kanto-brock', 0, 1),
+    ).toEqual(loss);
+    expect(await repository.get(2)).toMatchObject({ balance: 450, items: {} });
+    expect((await repository.get(2)).badges).toBeUndefined();
+    await expect(
+      service.debitBattlePenalty(2, 'one-battle', 'kanto-misty', 0),
+    ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+  });
+  it.each([
+    ['kanto-brock', 50],
+    ['kanto-misty', 100],
+    ['kanto-surge', 200],
+    ['kanto-erika', 300],
+    ['kanto-koga', 400],
+    ['kanto-sabrina', 400],
+    ['kanto-blaine', 500],
+    ['kanto-giovanni', 500],
+    ['kanto-lorelei', 500],
+    ['kanto-bruno', 500],
+    ['kanto-agatha', 500],
+    ['kanto-lance', 500],
+    ['kanto-rival-lab-grass', 50],
+    ['kanto-rival-lab-fire', 50],
+    ['kanto-rival-lab-water', 50],
+    ['kanto-rival-champion-grass', 500],
+    ['kanto-rival-champion-fire', 500],
+    ['kanto-rival-champion-water', 500],
+  ])(
+    'keeps the exact %s defeat tariff and clamps administrative debits',
+    async (presetId, nominalAmount) => {
+      expect(trainerPresetPenalty(presetId as string)).toBe(nominalAmount);
+      const receipt = await service.debitBattlePenalty(
+        2,
+        'preset-loss',
+        presetId as string,
+        0,
+      );
+      expect(receipt).toMatchObject({
+        penaltyVersion: 1,
+        nominalAmount,
+        amount: nominalAmount,
+        status: 'debited',
+      });
+      expect((await repository.get(2)).balance).toBe(
+        500 - Number(nominalAmount),
+      );
+    },
+  );
 });

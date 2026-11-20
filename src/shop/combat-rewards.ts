@@ -6,6 +6,14 @@ export const LOCAL_TRAINER_REWARDS = {
   red: 600,
   gold: 0,
 } as const;
+export const LOCAL_TRAINER_PENALTIES = {
+  pink: 0,
+  green: 100,
+  blue: 200,
+  yellow: 300,
+  red: 400,
+  gold: 0,
+} as const;
 
 export type TrainerRewardColor = keyof typeof LOCAL_TRAINER_REWARDS;
 export const GYM_REWARD_BADGES = {
@@ -24,6 +32,8 @@ export type LocalTrainerRewardClaim = {
   encounterId: string;
   epoch: number;
   color: TrainerRewardColor;
+  /** Present only for a newly enabled trainer defeat, including forfeit. */
+  penaltyVersion?: 1;
 };
 export type CombatReward = {
   rewardId: string;
@@ -36,12 +46,16 @@ export type CombatReward = {
   presetId?: string;
   amount: number;
   walletRevision: number;
-  status: 'credited' | 'rejected';
+  status: 'credited' | 'debited' | 'rejected';
   reason?: 'STALE_GAME';
   /** Absent on historical cash-only receipts; never infer or upgrade these. */
   rewardBundleVersion?: 1;
   badgeId?: GymBadgeId;
   items?: { tm: 1 };
+  penaltyVersion?: 1;
+  nominalAmount?: number;
+  balanceBefore?: number;
+  balanceAfter?: number;
 };
 export type StoredCombatReward = CombatReward & { requestHash: string };
 
@@ -66,5 +80,29 @@ export function trainerPresetReward(presetId: string): number | undefined {
     return 3000;
   if (/^kanto-rival-lab-(grass|fire|water)$/.test(presetId)) return 500;
   if (/^kanto-rival-champion-(grass|fire|water)$/.test(presetId)) return 6660;
+  return undefined;
+}
+
+export function trainerPresetPenalty(presetId: string): number | undefined {
+  const gyms: Record<string, number> = {
+    'kanto-brock': 50,
+    'kanto-misty': 100,
+    'kanto-surge': 200,
+    'kanto-erika': 300,
+    'kanto-koga': 400,
+    'kanto-sabrina': 400,
+    'kanto-blaine': 500,
+    'kanto-giovanni': 500,
+  };
+  if (Object.prototype.hasOwnProperty.call(gyms, presetId))
+    return gyms[presetId];
+  if (
+    ['kanto-lorelei', 'kanto-bruno', 'kanto-agatha', 'kanto-lance'].includes(
+      presetId,
+    )
+  )
+    return 500;
+  if (/^kanto-rival-lab-(grass|fire|water)$/.test(presetId)) return 50;
+  if (/^kanto-rival-champion-(grass|fire|water)$/.test(presetId)) return 500;
   return undefined;
 }

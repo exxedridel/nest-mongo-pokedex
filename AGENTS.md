@@ -1,5 +1,16 @@
 # Contexto de la trilogia Pokemon
 
+Etapa actual2026-11-20 React2.17/Nest: penalizacionesTrainerloss/forfeitclamp0,
+Giovanni500confirmado. Localpink0green100blue200yellow300red400gold0; presets
+Brock50Misty100Surge200Erika300KogaSabrina400BlaineGiovanniEliteChampion500Lab50.
+shop:reward-claimpenaltyVersion1/mismoIDwinlossfirstterminal/hashpenalty-v1
+intentonominal(noactual), CASminsaldo+receiptdebitednominal/real/balancesincl0.
+ResetepochSTALE0. pvp:create.lossPenaltyVersion1 sólotrainer, pendingRewardspenalty
+antesCAS/recoverload/finalizeantesliberar; empate/PvP/oldsinflagintactos. Noextras
+TMbadgeporloss. 260Shop68PvP/buildPASS. ReactTS/build/ChromePenalties5+Rewards5PASS.
+VerPunto/BATTLE_REWARDS_PROTOCOL. Nest→Reactrecargar2.17.0sinvars/MySQL/seed/reset/
+borrados/commit/push/deploy, no producciónverificada. ShopCOMPLETOno repetido2.17.
+
 Etapa actual2026-11-19 React2.14.0/Nest TERMINADA LOCAL. Newcreateoptin
 levelRewardsimmediate+TrainerrewardBundleVersion1, oldflagsabsentlegacyintacto.
 ValidateSessionstats/nivel exactos porledgerKOanteslote/appliedCount; NPCnoprogresa,

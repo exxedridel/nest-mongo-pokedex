@@ -299,7 +299,11 @@ describe('Durable PvP service, repository and private projection', () => {
     });
     return { battle, shop, wallets };
   }
-  async function featureBattle(trainer = true, extraMembers = false) {
+  async function featureBattle(
+    trainer = true,
+    extraMembers = false,
+    lossPenalty = false,
+  ) {
     const activity = new PlayerActivityService();
     const wallets = new MemoryShopRepository();
     const shop = new ShopService(wallets, auth as any, activity);
@@ -317,7 +321,11 @@ describe('Durable PvP service, repository and private projection', () => {
       playerAId: 2,
       levelRewards: 'immediate',
       ...(trainer
-        ? { trainerPresetId: 'kanto-brock', rewardBundleVersion: 1 }
+        ? {
+            trainerPresetId: 'kanto-brock',
+            rewardBundleVersion: 1,
+            ...(lossPenalty ? { lossPenaltyVersion: 1 } : {}),
+          }
         : { playerBId: 3 }),
     });
     let battle: Battle = created;
@@ -349,6 +357,186 @@ describe('Durable PvP service, repository and private projection', () => {
       eligibleSides: battle.mode === 'trainer' ? ['a'] : ['a', 'b'],
       appliedCount: 0,
     },
+  });
+  async function lostTrainer(
+    mode: 'defeat' | 'forfeit' | 'draw' = 'defeat',
+    enabled = true,
+  ) {
+    const {
+      battle: readyBattle,
+      wallets,
+      shop,
+    } = await featureBattle(true, false, enabled);
+    let battle = await service.checkpoint(actors[1], {
+      battleId: readyBattle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 0,
+      session: immediateSession(readyBattle),
+      processedCommandIds: [],
+    });
+    const ended = clone(battle.session);
+    ended.runtime.serial++;
+    ended.phase = 'finished';
+    ended.runtime.ended = true;
+    ended.runtime.winner = mode === 'draw' ? 'draw' : 'b';
+    if (mode !== 'forfeit')
+      for (const mon of ended.teams.a.pokemons)
+        mon.pokemon.stats.find((stat: any) => stat.name === 'hp').value = 0;
+    if (mode === 'draw')
+      for (const mon of ended.teams.b.pokemons)
+        mon.pokemon.stats.find((stat: any) => stat.name === 'hp').value = 0;
+    battle = await service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 1,
+      session: ended,
+      processedCommandIds: [],
+    });
+    return { battle, wallets, shop };
+  }
+  it.each(['defeat', 'forfeit'] as const)(
+    'settles a newly enabled Trainer %s once at finalization while preserving team state and existing progression',
+    async (mode) => {
+      const { battle, wallets } = await lostTrainer(mode);
+      expect(battle.lossPenaltyVersion).toBe(1);
+      expect(service.view(battle, actors[1]).lossPenaltyVersion).toBe(1);
+      expect((await wallets.get(2)).balance).toBe(500);
+      const done = await service.finalize(actors[1], {
+        battleId: battle.battleId,
+        hostEpoch: 1,
+      });
+      expect(done.results.a.outcome).toBe('lose');
+      expect(done.results.a.patches[0]).toMatchObject({
+        hp: mode === 'forfeit' ? 70 : 0,
+        statuses: ['burned'],
+      });
+      expect(done.results.a.patches[0]).not.toHaveProperty('level');
+      const wallet = await wallets.get(2);
+      expect(wallet.balance).toBe(450);
+      expect(wallet.rewards[0]).toMatchObject({
+        rewardId: `admin:${battle.battleId}`,
+        penaltyVersion: 1,
+        status: 'debited',
+        nominalAmount: 50,
+        amount: 50,
+      });
+      expect(wallet.items).toEqual({});
+      expect(wallet.badges).toBeUndefined();
+      expect(
+        (
+          await service.finalize(actors[1], {
+            battleId: battle.battleId,
+            hostEpoch: 1,
+          })
+        ).results,
+      ).toEqual(done.results);
+      const result = done.results.a;
+      await service.applied(actors[2], {
+        battleId: battle.battleId,
+        resultId: result.resultId,
+        snapshotId: result.snapshotId,
+        baseHash: result.baseHash,
+      });
+      await service.sync(actors[1], { battleId: battle.battleId });
+      expect((await wallets.get(2)).balance).toBe(450);
+      expect((await wallets.get(2)).rewards).toHaveLength(1);
+    },
+  );
+  it('does not add a new loss tariff to saved old Trainer battles or charge a draw', async () => {
+    for (const [mode, enabled] of [
+      ['defeat', false],
+      ['draw', true],
+    ] as const) {
+      repo = new MemoryPvpRepository();
+      const { battle, wallets } = await lostTrainer(mode, enabled);
+      await service.finalize(actors[1], {
+        battleId: battle.battleId,
+        hostEpoch: 1,
+      });
+      expect((await wallets.get(2)).balance).toBe(500);
+      expect((await wallets.get(2)).rewards).toBeUndefined();
+    }
+  });
+  it('recovers a persisted loss settlement after a clamped debit response is lost without charging later money', async () => {
+    const { battle, wallets, shop } = await lostTrainer('forfeit');
+    const low = await wallets.get(2),
+      previous = low.storageRevision;
+    low.balance = 25;
+    low.revision++;
+    low.storageRevision++;
+    await wallets.compareAndSwap(low, previous);
+    const debit = shop.debitBattlePenalty.bind(shop);
+    jest
+      .spyOn(shop, 'debitBattlePenalty')
+      .mockImplementationOnce(async (...args) => {
+        await debit(...args);
+        throw new Error('lost penalty response');
+      });
+    await expect(
+      service.finalize(actors[1], { battleId: battle.battleId, hostEpoch: 1 }),
+    ).rejects.toThrow('lost penalty response');
+    const pending = await repo.get(battle.battleId);
+    expect(pending.phase).toBe('finalizing');
+    expect(pending.lockHeld).toBe(true);
+    expect(pending.pendingRewards[0].penaltyVersion).toBe(1);
+    expect((await wallets.get(2)).balance).toBe(0);
+    const later = await wallets.get(2),
+      laterRevision = later.storageRevision;
+    later.balance = 100;
+    later.revision++;
+    later.storageRevision++;
+    await wallets.compareAndSwap(later, laterRevision);
+    const restored = await service.sync(actors[1], {
+      battleId: battle.battleId,
+    });
+    expect(restored.state.phase).toBe('finalizing');
+    expect((await repo.get(battle.battleId)).pendingRewards).toEqual([]);
+    expect((await wallets.get(2)).balance).toBe(100);
+    expect((await wallets.get(2)).rewards[0]).toMatchObject({
+      nominalAmount: 50,
+      amount: 25,
+      balanceBefore: 25,
+      balanceAfter: 0,
+    });
+    expect((await wallets.get(2)).rewards).toHaveLength(1);
+  });
+  it('binds the opt-in loss rule to creation identity and refuses penalties in player-vs-player battles', async () => {
+    for (const value of [0, 2, null, '1'])
+      await expect(
+        service.create(actors[1], {
+          commandId: 'invalid-loss-rule',
+          playerAId: 2,
+          trainerPresetId: 'kanto-brock',
+          lossPenaltyVersion: value,
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(
+      service.create(actors[1], {
+        commandId: 'invalid-pvp-loss',
+        playerAId: 2,
+        playerBId: 3,
+        lossPenaltyVersion: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    const { battle } = await featureBattle(true, false, true);
+    const replay = await service.create(actors[1], {
+      commandId: 'new-features',
+      playerAId: 2,
+      trainerPresetId: 'kanto-brock',
+      levelRewards: 'immediate',
+      rewardBundleVersion: 1,
+      lossPenaltyVersion: 1,
+    });
+    expect(replay.battleId).toBe(battle.battleId);
+    await expect(
+      service.create(actors[1], {
+        commandId: 'new-features',
+        playerAId: 2,
+        trainerPresetId: 'kanto-brock',
+        levelRewards: 'immediate',
+        rewardBundleVersion: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'COMMAND_CONFLICT' });
   });
   const fixtureLevel = (mon: any, level: number) => {
     const baseHp = mon.pokemon.baseStats.find(

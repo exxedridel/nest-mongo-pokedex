@@ -236,13 +236,21 @@ export class PvpService implements OnModuleInit {
           'La recompensa sigue pendiente de confirmación.',
         );
       const pending = battle.pendingRewards[0];
-      await this.shop.creditBattleReward(
-        pending.userId,
-        pending.battleId,
-        pending.presetId,
-        pending.epoch,
-        pending.rewardBundleVersion,
-      );
+      if (pending.penaltyVersion === 1)
+        await this.shop.debitBattlePenalty(
+          pending.userId,
+          pending.battleId,
+          pending.presetId,
+          pending.epoch,
+        );
+      else
+        await this.shop.creditBattleReward(
+          pending.userId,
+          pending.battleId,
+          pending.presetId,
+          pending.epoch,
+          pending.rewardBundleVersion,
+        );
       const previous = battle.revision;
       const next = clone(battle);
       next.pendingRewards = next.pendingRewards.slice(1);
@@ -448,6 +456,9 @@ export class PvpService implements OnModuleInit {
       ...(battle.rewardBundleVersion
         ? { rewardBundleVersion: battle.rewardBundleVersion }
         : {}),
+      ...(battle.lossPenaltyVersion
+        ? { lossPenaltyVersion: battle.lossPenaltyVersion }
+        : {}),
       ...(battle.leads
         ? {
             leads: admin
@@ -525,10 +536,16 @@ export class PvpService implements OnModuleInit {
       'trainerPresetId',
       'levelRewards',
       'rewardBundleVersion',
+      'lossPenaltyVersion',
     ]);
     id(payload.commandId);
     integer(payload.playerAId, 1);
     const isTrainer = payload.trainerPresetId !== undefined;
+    if (
+      payload.lossPenaltyVersion !== undefined &&
+      (payload.lossPenaltyVersion !== 1 || !isTrainer)
+    )
+      fail('INVALID_INPUT', 'La penalización requiere un Trainer compatible.');
     if (
       payload.levelRewards !== undefined &&
       payload.levelRewards !== 'immediate'
@@ -561,7 +578,8 @@ export class PvpService implements OnModuleInit {
       : [payload.playerAId, payload.playerBId];
     const creationHash = digest(
       payload.levelRewards !== undefined ||
-        payload.rewardBundleVersion !== undefined
+        payload.rewardBundleVersion !== undefined ||
+        payload.lossPenaltyVersion !== undefined
         ? [
             ...selection,
             {
@@ -570,6 +588,9 @@ export class PvpService implements OnModuleInit {
                 : {}),
               ...(payload.rewardBundleVersion
                 ? { rewardBundleVersion: payload.rewardBundleVersion }
+                : {}),
+              ...(payload.lossPenaltyVersion
+                ? { lossPenaltyVersion: payload.lossPenaltyVersion }
                 : {}),
             },
           ]
@@ -607,6 +628,9 @@ export class PvpService implements OnModuleInit {
       ...(payload.levelRewards ? { levelRewards: payload.levelRewards } : {}),
       ...(payload.rewardBundleVersion
         ? { rewardBundleVersion: payload.rewardBundleVersion }
+        : {}),
+      ...(payload.lossPenaltyVersion
+        ? { lossPenaltyVersion: payload.lossPenaltyVersion }
         : {}),
       ...(isTrainer ? { mode: 'trainer' as const, trainer } : {}),
       creationKey,
@@ -1086,6 +1110,28 @@ export class PvpService implements OnModuleInit {
           results[side] = result;
         }
         battle.results = results;
+        if (
+          battle.mode === 'trainer' &&
+          battle.lossPenaltyVersion === 1 &&
+          battle.session.runtime.winner === 'b'
+        ) {
+          if (!this.shop)
+            fail(
+              'REWARDS_UNAVAILABLE',
+              'No se pudo preparar la penalización del Trainer.',
+            );
+          battle.pendingRewards = [
+            {
+              userId: battle.players.a.user.id,
+              battleId: battle.battleId,
+              presetId: battle.trainer.presetId,
+              epoch: await this.shop.battleRewardEpoch(
+                battle.players.a.user.id,
+              ),
+              penaltyVersion: 1,
+            },
+          ];
+        }
         if (
           battle.mode === 'trainer' &&
           battle.session.rewards?.version === 1 &&
