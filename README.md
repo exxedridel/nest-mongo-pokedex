@@ -22,10 +22,18 @@ El importe se calcula aquí. El ledger de cartera guarda crédito+recibo en un C
 deduplicado por cuenta/encuentro. El jugador reintenta sin bloquear el juego.
 Los premios administrativos de los presets Kanto nacen del resultado guardado
 y usan un outbox recuperable por battleId. Nuevos Trainer con
-`rewardBundleVersion:1` entregan también TM +1 y medalla única del gimnasio en
+`rewardBundleVersion:1|2` entregan también TM +1 y medalla única del gimnasio en
 el mismo CAS; `Wallet.badges` publica esas medallas. Elite/rival no reciben esos
 extras. Los recibos anteriores no se modifican ni se conceden extras al repetirlos.
 JcJ, huida, rendición y empate no pagan.
+
+React2.19 crea Trainer con `rewardBundleVersion:2`. En las tres variantes del
+primer rival del laboratorio, Nest entrega **250 PD + una Great Ball** con un
+único CAS de saldo/inventario/recibo. Campeón sigue6660sinobjetos y gimnasios
+conservan TM/medalla. Repetir/reconectar/recuperar no entrega otra unidad.
+Versiones1 y ausente conservan laboratorio500sinobjeto y sus hashes originales,
+también si había `pendingRewards`; no se actualizan pagos históricos. Rechazos
+STALE_GAME y derrotas no entregan la Great Ball.
 
 React2.17.0 habilita penalizaciones con `rewards.lossPenaltyVersion:1` local y
 `pvp:create.lossPenaltyVersion:1` para Trainer administrativo. La misma RPC
@@ -43,7 +51,7 @@ también penalizaciones administrativas antes de liberar resultados.
 reiniciar. Premios de generaciones anteriores terminan con STALE_GAME sin cobro.
 No se borran carteras, partidas ni recibos. Ver
 [BATTLE_REWARDS_PROTOCOL.md](../BATTLE_REWARDS_PROTOCOL.md).
-Desplegar Nest antes de React y recargar a2.17.0; sin nuevas variables ni MySQL.
+Desplegar Nest antes de React y recargar a2.19.0; sin nuevas variables ni MySQL.
 
 ## Consumo en segundo plano: namespace `/shop`
 

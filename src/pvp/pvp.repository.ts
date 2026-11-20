@@ -20,7 +20,7 @@ export const PvpBattleSchema = new Schema(
     _id: { type: String, required: true },
     battleId: { type: String, required: true },
     levelRewards: { type: String, enum: ['immediate'], default: undefined },
-    rewardBundleVersion: { type: Number, enum: [1], default: undefined },
+    rewardBundleVersion: { type: Number, enum: [1, 2], default: undefined },
     lossPenaltyVersion: { type: Number, enum: [1], default: undefined },
     leads: Schema.Types.Mixed,
     mode: { type: String, enum: ['trainer'] },

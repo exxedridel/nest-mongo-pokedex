@@ -2260,19 +2260,21 @@ export class ShopService implements OnModuleInit {
             'WALLET_CONFLICT',
             'El saldo o la revisión está fuera de rango.',
           );
-        if (
-          !stale &&
-          request.items &&
-          !Number.isSafeInteger((row.items.tm ?? 0) + request.items.tm)
-        )
-          fail(
-            'WALLET_CONFLICT',
-            'Las existencias de TM están fuera de rango.',
-          );
+        const grants = Object.entries(request.items ?? {}) as [
+          'tm' | 'great-ball',
+          number,
+        ][];
+        if (!stale)
+          for (const [itemId, quantity] of grants)
+            if (!Number.isSafeInteger((row.items[itemId] ?? 0) + quantity))
+              fail(
+                'WALLET_CONFLICT',
+                'Las existencias del objeto de recompensa están fuera de rango.',
+              );
         if (!stale && (amount > 0 || request.items || request.badgeId)) {
           row.balance += penalty ? -amount : amount;
-          if (request.items)
-            row.items.tm = (row.items.tm ?? 0) + request.items.tm;
+          for (const [itemId, quantity] of grants)
+            row.items[itemId] = (row.items[itemId] ?? 0) + quantity;
           if (request.badgeId && !row.badges?.includes(request.badgeId))
             (row.badges ??= []).push(request.badgeId);
           row.revision++;
@@ -2314,20 +2316,26 @@ export class ShopService implements OnModuleInit {
     battleId: string,
     presetId: string,
     epoch: number,
-    rewardBundleVersion?: 1,
+    rewardBundleVersion?: 1 | 2,
   ): Promise<CombatReward> {
-    const amount = trainerPresetReward(presetId);
+    const amount = trainerPresetReward(presetId, rewardBundleVersion);
     if (amount === undefined)
       fail('INVALID_TRAINER', 'No existe recompensa para este Trainer.');
     id(battleId);
     integer(epoch);
-    if (rewardBundleVersion !== undefined && rewardBundleVersion !== 1)
+    if (
+      rewardBundleVersion !== undefined &&
+      ![1, 2].includes(rewardBundleVersion)
+    )
       fail('INVALID_INPUT', 'La versión de recompensa no es válida.');
     const badgeId =
-      rewardBundleVersion === 1 &&
+      rewardBundleVersion !== undefined &&
       Object.prototype.hasOwnProperty.call(GYM_REWARD_BADGES, presetId)
         ? GYM_REWARD_BADGES[presetId as keyof typeof GYM_REWARD_BADGES]
         : undefined;
+    const firstRival =
+      rewardBundleVersion === 2 &&
+      /^kanto-rival-lab-(grass|fire|water)$/.test(presetId);
     return this.activity.runExclusive(
       [userId],
       async () =>
@@ -2341,8 +2349,11 @@ export class ShopService implements OnModuleInit {
               presetId,
               epoch,
               amount,
-              ...(rewardBundleVersion === 1 ? { rewardBundleVersion } : {}),
+              ...(rewardBundleVersion !== undefined
+                ? { rewardBundleVersion }
+                : {}),
               ...(badgeId ? { badgeId, items: { tm: 1 as const } } : {}),
+              ...(firstRival ? { items: { 'great-ball': 1 as const } } : {}),
             },
           ])
         )[0],

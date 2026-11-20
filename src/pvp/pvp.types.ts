@@ -89,7 +89,7 @@ export type BattleTrainer = {
 export type Battle = {
   battleId: string;
   levelRewards?: 'immediate';
-  rewardBundleVersion?: 1;
+  rewardBundleVersion?: 1 | 2;
   lossPenaltyVersion?: 1;
   leads?: Partial<Record<Side, string>>;
   mode?: 'trainer';
@@ -144,7 +144,7 @@ export type Battle = {
     battleId: string;
     presetId: string;
     epoch: number;
-    rewardBundleVersion?: 1;
+    rewardBundleVersion?: 1 | 2;
     penaltyVersion?: 1;
   }[];
 };

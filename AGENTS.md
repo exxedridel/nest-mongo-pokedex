@@ -1,5 +1,14 @@
 # Contexto de la trilogia Pokemon
 
+Etapa vigente2026-11-20 React2.19/Nest: primerRivalLabv2=250PD+1GreatBall/3variantes.
+rewardBundleVersion1|2 en schema/create/pending/recovery, CAScash+GB+receipt/dedupe.
+trainerPresetReward default/v1LAB500 INTENCIONALlegacyhash/oldpending, v2LAB250.
+No retroextras. V2gymsTMbadgeigual, champion6660sinitems, penaltyLab50intactos.
+StocklimitsantesCAS+stale0sinGB, granttypedTM/GB.269Shop71PvP/buildPASS; Front
+15money47wallet/TS/build/audit175PASS; ChromeRewards6PASSsinJSerrors/cleanup. VerPunto/
+BATTLE_REWARDS_PROTOCOL. Nest→Reactrecargar2.19sinvars/MySQL/seed/reset/borrados/
+commit/push/deploy, producciónnoverificada.
+
 Etapa actual2026-11-20 React2.17/Nest: penalizacionesTrainerloss/forfeitclamp0,
 Giovanni500confirmado. Localpink0green100blue200yellow300red400gold0; presets
 Brock50Misty100Surge200Erika300KogaSabrina400BlaineGiovanniEliteChampion500Lab50.

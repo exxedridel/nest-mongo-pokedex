@@ -207,11 +207,15 @@ describe('Durable PvP service, repository and private projection', () => {
       processedCommandIds: [],
     });
   }
-  async function readyTrainer(presetId = 'kanto-brock'): Promise<Battle> {
+  async function readyTrainer(
+    presetId = 'kanto-brock',
+    rewardBundleVersion?: 1 | 2,
+  ): Promise<Battle> {
     const battle = await service.create(actors[1], {
       commandId: 'create-trainer',
       playerAId: 2,
       trainerPresetId: presetId,
+      ...(rewardBundleVersion !== undefined ? { rewardBundleVersion } : {}),
     });
     const snap = snapshot(battle, 2, actors[2].clientId);
     snap.hpMultiplier = 2;
@@ -227,7 +231,12 @@ describe('Durable PvP service, repository and private projection', () => {
       processedCommandIds: [],
     });
   }
-  async function rewardBattle(trainer = true, winnerLevel = 20) {
+  async function rewardBattle(
+    trainer = true,
+    winnerLevel = 20,
+    presetId = 'kanto-brock',
+    rewardBundleVersion?: 1 | 2,
+  ) {
     const activity = new PlayerActivityService();
     const wallets = new MemoryShopRepository();
     const shop = new ShopService(wallets, auth as any, activity);
@@ -240,7 +249,9 @@ describe('Durable PvP service, repository and private projection', () => {
     }
     for (const userId of [2, 3])
       await shop.presence(actors[userId], { ready: true, localBattle: false });
-    const readyBattle = trainer ? await readyTrainer() : await ready();
+    const readyBattle = trainer
+      ? await readyTrainer(presetId, rewardBundleVersion)
+      : await ready();
     if (winnerLevel !== 20) {
       const mon = readyBattle.players.a.snapshot.pokemons[0];
       mon.pokemon.level = winnerLevel;
@@ -841,6 +852,53 @@ describe('Durable PvP service, repository and private projection', () => {
     expect((await wallets.get(2)).balance).toBe(1700);
     expect((await wallets.get(2)).rewards).toHaveLength(1);
   });
+  it.each([undefined, 1, 2] as const)(
+    'preserves first-rival reward bundle %s through persisted finalization and lost credit responses',
+    async (version) => {
+      const { battle, shop, wallets } = await rewardBattle(
+        true,
+        20,
+        'kanto-rival-lab-grass',
+        version,
+      );
+      expect(battle.rewardBundleVersion).toBe(version);
+      expect(service.view(battle, actors[1]).rewardBundleVersion).toBe(version);
+      const credit = shop.creditBattleReward.bind(shop);
+      jest
+        .spyOn(shop, 'creditBattleReward')
+        .mockImplementationOnce(async (...args) => {
+          await credit(...args);
+          throw new Error('lost rival reward response');
+        });
+      await expect(
+        service.finalize(actors[1], {
+          battleId: battle.battleId,
+          hostEpoch: 1,
+        }),
+      ).rejects.toThrow('lost rival reward response');
+      const pending = await repo.get(battle.battleId);
+      expect(pending.phase).toBe('finalizing');
+      expect(pending.lockHeld).toBe(true);
+      expect(pending.pendingRewards).toHaveLength(1);
+      expect(pending.pendingRewards[0].rewardBundleVersion).toBe(version);
+      const beforeRecovery = await wallets.get(2);
+      expect(beforeRecovery.balance).toBe(version === 2 ? 750 : 1000);
+      expect(beforeRecovery.items).toEqual(
+        version === 2 ? { 'great-ball': 1 } : {},
+      );
+      expect(beforeRecovery.rewards[0]).not.toHaveProperty('badgeId');
+      await service.sync(actors[1], { battleId: battle.battleId });
+      expect((await repo.get(battle.battleId)).pendingRewards).toEqual([]);
+      expect(await wallets.get(2)).toEqual(beforeRecovery);
+      const done = await service.finalize(actors[1], {
+        battleId: battle.battleId,
+        hostEpoch: 1,
+      });
+      expect(done.results.a.patches[0].level).toBe(21);
+      expect((await wallets.get(2)).rewards).toHaveLength(1);
+      expect(await wallets.get(2)).toEqual(beforeRecovery);
+    },
+  );
   it('awards player-vs-player levels but never money', async () => {
     const { battle, wallets } = await rewardBattle(false);
     const done = await service.finalize(actors[1], {

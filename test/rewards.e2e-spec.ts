@@ -243,6 +243,198 @@ describe('Automatic combat rewards in the authoritative wallet', () => {
       expect(row.rewards).toHaveLength(2);
     },
   );
+  it.each(['grass', 'fire', 'water'])(
+    'pays the version-2 first rival %s with 250 PD and exactly one Great Ball per new victory',
+    async (starter) => {
+      const presetId = `kanto-rival-lab-${starter}`;
+      expect(trainerPresetReward(presetId, 2)).toBe(250);
+      expect(trainerPresetReward(presetId, 1)).toBe(500);
+      expect(trainerPresetReward(presetId)).toBe(500);
+      const first = await service.creditBattleReward(
+        2,
+        'rival-one',
+        presetId,
+        0,
+        2,
+      );
+      expect(first).toMatchObject({
+        rewardBundleVersion: 2,
+        amount: 250,
+        items: { 'great-ball': 1 },
+        status: 'credited',
+        walletRevision: 1,
+      });
+      expect(first).not.toHaveProperty('badgeId');
+      const afterFirst = await repository.get(2);
+      expect(afterFirst.balance).toBe(750);
+      expect(afterFirst.items).toEqual({ 'great-ball': 1 });
+      expect(afterFirst.badges).toBeUndefined();
+      expect(
+        await service.creditBattleReward(2, 'rival-one', presetId, 0, 2),
+      ).toEqual(first);
+      expect(await repository.get(2)).toEqual(afterFirst);
+      await service.creditBattleReward(2, 'rival-two', presetId, 0, 2);
+      const afterSecond = await repository.get(2);
+      expect(afterSecond.balance).toBe(1000);
+      expect(afterSecond.items).toEqual({ 'great-ball': 2 });
+      expect(afterSecond.rewards).toHaveLength(2);
+    },
+  );
+  it.each([undefined, 1] as const)(
+    'preserves first-rival cash-only receipts and hashes for legacy bundle %s',
+    async (version) => {
+      const first = await service.creditBattleReward(
+        2,
+        'old-rival',
+        'kanto-rival-lab-grass',
+        0,
+        version,
+      );
+      const saved = await repository.get(2);
+      expect(first.amount).toBe(500);
+      expect(first).not.toHaveProperty('items');
+      expect(saved.balance).toBe(1000);
+      expect(saved.items).toEqual({});
+      await expect(
+        service.creditBattleReward(
+          2,
+          'old-rival',
+          'kanto-rival-lab-grass',
+          0,
+          2,
+        ),
+      ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+      expect(
+        await service.creditBattleReward(
+          2,
+          'old-rival',
+          'kanto-rival-lab-grass',
+          0,
+          version,
+        ),
+      ).toEqual(first);
+      expect(await repository.get(2)).toEqual(saved);
+    },
+  );
+  it('keeps all version-2 gym, Elite Four, champion and defeat tariffs and grants unchanged', async () => {
+    const gym = await service.creditBattleReward(
+      2,
+      'new-gym',
+      'kanto-brock',
+      0,
+      2,
+    );
+    expect(gym).toMatchObject({
+      amount: 1200,
+      items: { tm: 1 },
+      badgeId: 'boulder',
+      rewardBundleVersion: 2,
+    });
+    for (const presetId of ['kanto-lorelei', 'kanto-rival-champion-fire']) {
+      const reward = await service.creditBattleReward(
+        2,
+        presetId,
+        presetId,
+        0,
+        2,
+      );
+      expect(reward.amount).toBe(trainerPresetReward(presetId));
+      expect(reward).not.toHaveProperty('items');
+      expect(reward).not.toHaveProperty('badgeId');
+    }
+    const penaltyReceipt = await service.debitBattlePenalty(
+      2,
+      'lost-lab',
+      'kanto-rival-lab-water',
+      0,
+    );
+    expect(penaltyReceipt).toMatchObject({
+      nominalAmount: 50,
+      amount: 50,
+      status: 'debited',
+    });
+    const row = await repository.get(2);
+    expect(row.items).toEqual({ tm: 1 });
+    expect(row.badges).toEqual(['boulder']);
+  });
+  it('rejects a stale new rival bundle with no money, Great Ball, TM or badge', async () => {
+    const row = await repository.get(2);
+    const revision = row.storageRevision++;
+    row.rewardEpoch = 1;
+    await repository.compareAndSwap(row, revision);
+    const rejected = await service.creditBattleReward(
+      2,
+      'stale-rival',
+      'kanto-rival-lab-water',
+      0,
+      2,
+    );
+    expect(rejected).toMatchObject({
+      status: 'rejected',
+      reason: 'STALE_GAME',
+      rewardBundleVersion: 2,
+      amount: 0,
+    });
+    expect(rejected).not.toHaveProperty('items');
+    expect(rejected).not.toHaveProperty('badgeId');
+    expect((await repository.get(2)).balance).toBe(500);
+    expect((await repository.get(2)).items).toEqual({});
+  });
+  it('saves the new cash and Great Ball together through CAS conflict and failed persistence', async () => {
+    const before = await repository.get(2);
+    jest
+      .spyOn(repository, 'compareAndSwap')
+      .mockRejectedValueOnce(new Error('failed wallet write'));
+    await expect(
+      service.creditBattleReward(
+        2,
+        'save-rival',
+        'kanto-rival-lab-grass',
+        0,
+        2,
+      ),
+    ).rejects.toThrow('failed wallet write');
+    expect(await repository.get(2)).toEqual(before);
+    jest.spyOn(repository, 'compareAndSwap').mockResolvedValueOnce(false);
+    const receipt = await service.creditBattleReward(
+      2,
+      'save-rival',
+      'kanto-rival-lab-grass',
+      0,
+      2,
+    );
+    const saved = await repository.get(2);
+    expect(saved.balance).toBe(750);
+    expect(saved.items).toEqual({ 'great-ball': 1 });
+    expect(saved.rewards).toHaveLength(1);
+    expect(
+      await service.creditBattleReward(
+        2,
+        'save-rival',
+        'kanto-rival-lab-grass',
+        0,
+        2,
+      ),
+    ).toEqual(receipt);
+    expect(await repository.get(2)).toEqual(saved);
+  });
+  it('refuses overflowing Great Ball inventory without crediting the accompanying money', async () => {
+    const row = await repository.get(2);
+    const previous = row.storageRevision++;
+    row.items['great-ball'] = Number.MAX_SAFE_INTEGER;
+    await repository.compareAndSwap(row, previous);
+    const before = await repository.get(2);
+    await expect(
+      service.creditBattleReward(
+        2,
+        'overflow-rival',
+        'kanto-rival-lab-fire',
+        0,
+        2,
+      ),
+    ).rejects.toMatchObject({ code: 'WALLET_CONFLICT' });
+    expect(await repository.get(2)).toEqual(before);
+  });
   it('never upgrades old cash-only receipts and emits no gym extras for the Elite Four or rival', async () => {
     const old = await service.creditBattleReward(
       2,

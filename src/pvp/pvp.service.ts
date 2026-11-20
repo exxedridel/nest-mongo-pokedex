@@ -553,7 +553,7 @@ export class PvpService implements OnModuleInit {
       fail('INVALID_INPUT', 'El modo de progresión no es válido.');
     if (
       payload.rewardBundleVersion !== undefined &&
-      (payload.rewardBundleVersion !== 1 || !isTrainer)
+      (![1, 2].includes(payload.rewardBundleVersion) || !isTrainer)
     )
       fail(
         'INVALID_INPUT',
@@ -1151,8 +1151,8 @@ export class PvpService implements OnModuleInit {
               epoch: await this.shop.battleRewardEpoch(
                 battle.players.a.user.id,
               ),
-              ...(battle.rewardBundleVersion === 1
-                ? { rewardBundleVersion: 1 as const }
+              ...(battle.rewardBundleVersion !== undefined
+                ? { rewardBundleVersion: battle.rewardBundleVersion }
                 : {}),
             },
           ];

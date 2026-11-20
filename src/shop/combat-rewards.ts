@@ -49,9 +49,9 @@ export type CombatReward = {
   status: 'credited' | 'debited' | 'rejected';
   reason?: 'STALE_GAME';
   /** Absent on historical cash-only receipts; never infer or upgrade these. */
-  rewardBundleVersion?: 1;
+  rewardBundleVersion?: 1 | 2;
   badgeId?: GymBadgeId;
-  items?: { tm: 1 };
+  items?: { tm: 1 } | { 'great-ball': 1 };
   penaltyVersion?: 1;
   nominalAmount?: number;
   balanceBefore?: number;
@@ -59,7 +59,10 @@ export type CombatReward = {
 };
 export type StoredCombatReward = CombatReward & { requestHash: string };
 
-export function trainerPresetReward(presetId: string): number | undefined {
+export function trainerPresetReward(
+  presetId: string,
+  rewardBundleVersion?: 1 | 2,
+): number | undefined {
   const gyms: Record<string, number> = {
     'kanto-brock': 1200,
     'kanto-misty': 1400,
@@ -78,7 +81,9 @@ export function trainerPresetReward(presetId: string): number | undefined {
     )
   )
     return 3000;
-  if (/^kanto-rival-lab-(grass|fire|water)$/.test(presetId)) return 500;
+  // Existing battles/receipts retain their original cash-only reward.
+  if (/^kanto-rival-lab-(grass|fire|water)$/.test(presetId))
+    return rewardBundleVersion === 2 ? 250 : 500;
   if (/^kanto-rival-champion-(grass|fire|water)$/.test(presetId)) return 6660;
   return undefined;
 }
