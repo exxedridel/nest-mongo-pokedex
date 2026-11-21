@@ -236,6 +236,7 @@ describe('Durable PvP service, repository and private projection', () => {
     winnerLevel = 20,
     presetId = 'kanto-brock',
     rewardBundleVersion?: 1 | 2,
+    levelRuleVersion?: 2,
   ) {
     const activity = new PlayerActivityService();
     const wallets = new MemoryShopRepository();
@@ -298,7 +299,14 @@ describe('Durable PvP service, repository and private projection', () => {
         defeatedCaptureId: defeated.captureId,
         winnerLevel: winner.pokemon.level,
         defeatedLevel: defeated.pokemon.level,
-        levels: defeated.pokemon.level > winner.pokemon.level ? 2 : 1,
+        levels: (
+          levelRuleVersion === 2
+            ? defeated.pokemon.level >= winner.pokemon.level
+            : defeated.pokemon.level > winner.pokemon.level
+        )
+          ? 2
+          : 1,
+        ...(levelRuleVersion === 2 ? { levelRuleVersion } : {}),
       });
     }
     battle = await service.checkpoint(actors[1], {
@@ -583,6 +591,7 @@ describe('Durable PvP service, repository and private projection', () => {
     winnerSide: 'a' | 'b',
     defeatedSide: 'a' | 'b',
     defeatedIndex = 0,
+    levelRuleVersion?: 2,
   ) => {
     const winner = next.teams[winnerSide].pokemons[0];
     const defeated = next.teams[defeatedSide].pokemons[defeatedIndex];
@@ -595,9 +604,258 @@ describe('Durable PvP service, repository and private projection', () => {
       defeatedCaptureId: defeated.captureId,
       winnerLevel: winner.pokemon.level,
       defeatedLevel: defeated.pokemon.level,
-      levels: defeated.pokemon.level > winner.pokemon.level ? 2 : 1,
+      levels: (
+        levelRuleVersion === 2
+          ? defeated.pokemon.level >= winner.pokemon.level
+          : defeated.pokemon.level > winner.pokemon.level
+      )
+        ? 2
+        : 1,
+      ...(levelRuleVersion === 2 ? { levelRuleVersion } : {}),
     });
   };
+  async function startLevelRuleBattle(
+    winnerLevel = 20,
+    defeatedLevel = 20,
+    extraMembers = false,
+  ) {
+    const prepared = await featureBattle(false, extraMembers);
+    const readyBattle = prepared.battle;
+    fixtureLevel(readyBattle.players.a.snapshot.pokemons[0], winnerLevel);
+    fixtureLevel(readyBattle.players.b.snapshot.pokemons[0], defeatedLevel);
+    for (const side of ['a', 'b'] as const)
+      readyBattle.players[side].snapshot.baseHash = digest(
+        readyBattle.players[side].snapshot.pokemons,
+      );
+    const previous = readyBattle.revision++;
+    await repo.compareAndSwap(readyBattle, previous);
+    const battle = await service.checkpoint(actors[1], {
+      battleId: readyBattle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 0,
+      session: immediateSession(readyBattle),
+      processedCommandIds: [],
+    });
+    return { ...prepared, battle };
+  }
+  const finishNewLevelRule = (battle: Battle, levels: number) => {
+    const final = clone(battle.session);
+    final.runtime.serial++;
+    fixtureDefeat(final, 'a', 'b', 0, 2);
+    fixtureLevel(
+      final.teams.a.pokemons[0],
+      Math.min(100, final.teams.a.pokemons[0].pokemon.level + levels),
+    );
+    final.rewards.appliedCount = 1;
+    final.phase = 'finished';
+    final.runtime.ended = true;
+    final.runtime.winner = 'a';
+    return final;
+  };
+  it.each([
+    [19, 1],
+    [20, 2],
+    [21, 2],
+  ])(
+    'accepts new rule opponent level %i with exactly %i immediate levels and no replayed gain',
+    async (defeatedLevel, levels) => {
+      const { battle: started, wallets } = await startLevelRuleBattle(
+        20,
+        defeatedLevel,
+      );
+      const final = finishNewLevelRule(started, levels);
+      expect(final.rewards.defeats[0]).toMatchObject({
+        levelRuleVersion: 2,
+        winnerLevel: 20,
+        defeatedLevel,
+        levels,
+      });
+      const payload = {
+        battleId: started.battleId,
+        hostEpoch: 1,
+        expectedCheckpointRevision: 1,
+        session: final,
+        processedCommandIds: [],
+      };
+      const saved = await service.checkpoint(actors[1], payload);
+      expect(saved.session.teams.a.pokemons[0].pokemon.level).toBe(20 + levels);
+      expect((await service.checkpoint(actors[1], payload)).revision).toBe(
+        saved.revision,
+      );
+      const done = await service.finalize(actors[1], {
+        battleId: started.battleId,
+        hostEpoch: 1,
+      });
+      expect(done.results.a.patches[0]).toMatchObject({
+        level: 20 + levels,
+        statuses: ['burned'],
+      });
+      expect(
+        (
+          await service.finalize(actors[1], {
+            battleId: started.battleId,
+            hostEpoch: 1,
+          })
+        ).results,
+      ).toEqual(done.results);
+      expect((await wallets.get(2)).balance).toBe(500);
+      expect((await wallets.get(3)).balance).toBe(500);
+    },
+  );
+  it('caps a new equal-level two-level reward at 100 without changing PP or adding progress again', async () => {
+    const { battle: started } = await startLevelRuleBattle(99, 99);
+    const final = finishNewLevelRule(started, 2);
+    final.teams.a.pokemons[0].moves[0].currentPp = 0;
+    const saved = await service.checkpoint(actors[1], {
+      battleId: started.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 1,
+      session: final,
+      processedCommandIds: [],
+    });
+    expect(saved.session.rewards.defeats[0].levels).toBe(2);
+    expect(saved.session.teams.a.pokemons[0].pokemon.level).toBe(100);
+    const done = await service.finalize(actors[1], {
+      battleId: started.battleId,
+      hostEpoch: 1,
+    });
+    expect(done.results.a.patches[0]).toMatchObject({
+      level: 100,
+      movesPp: [{ moveId: 1, currentPp: 0 }],
+      statuses: ['burned'],
+    });
+  });
+  it('rejects wrong rule versions, equal-level one-point new rewards and unversioned two-point rewards without changing the reserved battle', async () => {
+    const { battle } = await startLevelRuleBattle();
+    const final = finishNewLevelRule(battle, 2);
+    for (const version of [1, 3, '2', null]) {
+      const bad = clone(final);
+      bad.rewards.defeats[0].levelRuleVersion = version;
+      expect(() => validateSession(bad, battle)).toThrow();
+    }
+    const oldRate = clone(final);
+    oldRate.rewards.defeats[0].levels = 1;
+    fixtureLevel(oldRate.teams.a.pokemons[0], 21);
+    expect(() => validateSession(oldRate, battle)).toThrow();
+    const unversioned = clone(final);
+    delete unversioned.rewards.defeats[0].levelRuleVersion;
+    expect(() => validateSession(unversioned, battle)).toThrow();
+    const stored = await repo.get(battle.battleId);
+    expect(stored.session.rewards.defeats).toEqual([]);
+    expect(stored.lockHeld).toBe(true);
+    expect(stored.checkpointRevision).toBe(1);
+  });
+  it('preserves a saved equal-level legacy reward and appends a new equal-level reward after reload without rewriting its prefix', async () => {
+    const {
+      battle: readyBattle,
+      shop,
+      wallets,
+    } = await featureBattle(false, true);
+    fixtureLevel(readyBattle.players.b.snapshot.pokemons[1], 21);
+    readyBattle.players.b.snapshot.baseHash = digest(
+      readyBattle.players.b.snapshot.pokemons,
+    );
+    const previous = readyBattle.revision++;
+    await repo.compareAndSwap(readyBattle, previous);
+    let battle = await service.checkpoint(actors[1], {
+      battleId: readyBattle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 0,
+      session: immediateSession(readyBattle),
+      processedCommandIds: [],
+    });
+    const old = clone(battle.session);
+    old.runtime.serial++;
+    fixtureDefeat(old, 'a', 'b');
+    fixtureLevel(old.teams.a.pokemons[0], 21);
+    old.rewards.appliedCount = 1;
+    battle = await service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 1,
+      session: old,
+      processedCommandIds: [],
+    });
+    const originalPrefix = stableJson(battle.session.rewards.defeats);
+    expect(battle.session.rewards.defeats[0]).not.toHaveProperty(
+      'levelRuleVersion',
+    );
+    expect(battle.session.rewards.defeats[0].levels).toBe(1);
+    const reloaded = new PvpService(repo, auth as any, undefined, shop);
+    await reloaded.onModuleInit();
+    for (const actor of Object.values(actors)) reloaded.connect(actor);
+    service = reloaded;
+    await service.sync(actors[1], { battleId: battle.battleId });
+    battle = await repo.get(battle.battleId);
+    expect(stableJson(battle.session.rewards.defeats)).toBe(originalPrefix);
+    const final = clone(battle.session);
+    final.runtime.serial++;
+    fixtureDefeat(final, 'a', 'b', 1, 2);
+    expect(final.rewards.defeats[1]).toMatchObject({
+      winnerLevel: 21,
+      defeatedLevel: 21,
+      levels: 2,
+      levelRuleVersion: 2,
+    });
+    fixtureLevel(final.teams.a.pokemons[0], 23);
+    final.rewards.appliedCount = 2;
+    final.phase = 'finished';
+    final.runtime.ended = true;
+    final.runtime.winner = 'a';
+    const rewritten = clone(final);
+    rewritten.rewards.defeats[0].levelRuleVersion = 2;
+    rewritten.rewards.defeats[0].levels = 2;
+    expect(() => validateSession(rewritten, battle)).toThrow();
+    const payload = {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 2,
+      session: final,
+      processedCommandIds: [],
+    };
+    const saved = await service.checkpoint(actors[1], payload);
+    expect(stableJson(saved.session.rewards.defeats.slice(0, 1))).toBe(
+      originalPrefix,
+    );
+    expect((await service.checkpoint(actors[1], payload)).revision).toBe(
+      saved.revision,
+    );
+    const done = await service.finalize(actors[1], {
+      battleId: saved.battleId,
+      hostEpoch: 1,
+    });
+    expect(done.results.a.patches[0].level).toBe(23);
+    expect((await wallets.get(2)).balance).toBe(500);
+    expect((await wallets.get(3)).balance).toBe(500);
+  });
+  it('applies the new per-event equal-level rate to a resumed deferred battle while preserving legacy unmarked events', async () => {
+    const { battle } = await rewardBattle(
+      false,
+      20,
+      'kanto-brock',
+      undefined,
+      2,
+    );
+    expect(battle.levelRewards).toBeUndefined();
+    expect(battle.session.teams.a.pokemons[0].pokemon.level).toBe(20);
+    expect(battle.session.rewards.defeats[0]).toMatchObject({
+      levelRuleVersion: 2,
+      levels: 2,
+    });
+    const done = await service.finalize(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+    });
+    expect(done.results.a.patches[0].level).toBe(22);
+    expect(
+      (
+        await service.finalize(actors[1], {
+          battleId: battle.battleId,
+          hostEpoch: 1,
+        })
+      ).results,
+    ).toEqual(done.results);
+  });
   it('persists a living human lead before start without changing team order, snapshots or opponent privacy', async () => {
     const { battle } = await featureBattle(false, true);
     const originals = clone(battle.players);
@@ -2369,5 +2627,209 @@ describe('Full Restore battle inventory settlement', () => {
     expect(resumed.state.itemInventory.a['max-ether']).toBe(1);
     expect((await shop.battleItemStock(2))['max-ether']).toBe(1);
     expect(wallets.rows.get(2).battleUses).toHaveLength(1);
+  });
+});
+
+describe('Max Revive battle authorization and durable settlement', () => {
+  let repo: MemoryPvpRepository,
+    wallets: MemoryShopRepository,
+    shop: ShopService,
+    pvp: PvpService,
+    actors: Record<number, Actor>,
+    battle: Battle;
+  beforeEach(async () => {
+    const auth = fakeAuth();
+    const activity = new PlayerActivityService();
+    repo = new MemoryPvpRepository();
+    wallets = new MemoryShopRepository();
+    shop = new ShopService(wallets, auth as any, activity);
+    pvp = new PvpService(repo, auth as any, activity, shop);
+    await shop.onModuleInit();
+    await pvp.onModuleInit();
+    actors = Object.fromEntries(
+      [...auth.users.values()].map((user) => [
+        user.id,
+        {
+          user: clone(user),
+          clientId: `revive-client-${user.id}`,
+          socketId: `revive-socket-${user.id}`,
+          token: `test-user-${user.id}`,
+        },
+      ]),
+    ) as any;
+    for (const actor of Object.values(actors)) {
+      shop.connect(actor);
+      pvp.connect(actor);
+    }
+    for (const id of [2, 3]) {
+      await shop.presence(actors[id], { ready: true, localBattle: false });
+      wallets.rows.get(id).items = {
+        'max-revive': 2,
+        'rare-candy': 2,
+        'full-restore': 2,
+      };
+    }
+  });
+  async function start(mode: 'pvp' | 'trainer' = 'pvp') {
+    battle = await pvp.create(actors[1], {
+      commandId: 'revive-battle',
+      playerAId: 2,
+      ...(mode === 'pvp'
+        ? { playerBId: 3 }
+        : { trainerPresetId: 'kanto-brock' }),
+    });
+    for (const id of mode === 'pvp' ? [2, 3] : [2]) {
+      const snap = snapshot(battle, id, actors[id].clientId);
+      const reserve = capture('fainted-reserve');
+      reserve.captureId = 'revive-reserve';
+      reserve.pokemon.stats[0].value = 0;
+      reserve.moves[0].currentPp = 4;
+      snap.pokemons.push(reserve);
+      snap.baseHash = digest(snap.pokemons);
+      await pvp.snapshot(actors[id], { snapshot: snap });
+    }
+    battle = await repo.get(battle.battleId);
+    battle = await pvp.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 0,
+      session: session(battle),
+      processedCommandIds: [],
+    });
+  }
+  const command = (
+    item = 'max-revive',
+    captureId = 'revive-reserve',
+    extras = {},
+  ) => ({
+    battleId: battle.battleId,
+    commandId: 'revive-command',
+    side: 'a',
+    requestKey: requestKey(battle.session, 'a'),
+    choice: { kind: 'item', item, captureId, ...extras },
+  });
+  function resolved(queued: Battle) {
+    const next = clone(queued.session);
+    next.teams.a.pokemons.find(
+      (mon: any) => mon.captureId === 'revive-reserve',
+    ).pokemon.stats[0].value = 91;
+    next.networkItems = { pending: {}, used: ['revive-command'] };
+    next.runtime.serial++;
+    next.runtime.pending = {};
+    return {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: queued.checkpointRevision,
+      session: next,
+      processedCommandIds: ['revive-command'],
+    };
+  }
+  it.each(['pvp', 'trainer'] as const)(
+    'revives a fainted reserve in %s only when its authorized effect is saved and never debits a replay twice',
+    async (mode) => {
+      await start(mode);
+      const original = clone(battle.session.teams.a.pokemons[1]);
+      const queued = await pvp.command(actors[1], command());
+      expect(queued.commands[0].inventoryAuthorized).toBe(true);
+      expect((await shop.battleItemStock(2))['max-revive']).toBe(2);
+      const payload = resolved(queued);
+      const saved = await pvp.checkpoint(actors[1], payload);
+      const revived = saved.session.teams.a.pokemons[1];
+      expect(revived.pokemon.stats[0].value).toBe(91);
+      expect(revived.moves).toEqual(original.moves);
+      expect(revived.statuses).toEqual(original.statuses);
+      expect(revived.pokemon.battleStages).toEqual(
+        original.pokemon.battleStages,
+      );
+      expect(saved.itemInventory.a['max-revive']).toBe(1);
+      expect(saved.inventory.a).toBe(2);
+      expect((await shop.battleItemStock(2))['max-revive']).toBe(1);
+      expect((await wallets.get(2)).items['rare-candy']).toBe(2);
+      await pvp.checkpoint(actors[1], payload);
+      expect((await wallets.get(2)).battleUses).toHaveLength(1);
+      expect((await wallets.get(2)).balance).toBe(500);
+    },
+  );
+  it('rejects a living target, move selectors, Rare Candy and forced replacements without spending inventory', async () => {
+    await start();
+    await expect(
+      pvp.command(
+        actors[1],
+        command('max-revive', battle.session.teams.a.activeCaptureId),
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_CHOICE' });
+    await expect(
+      pvp.command(
+        actors[1],
+        command('max-revive', 'revive-reserve', { moveId: 1 }),
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_CHOICE' });
+    await expect(
+      pvp.command(actors[1], command('rare-candy')),
+    ).rejects.toMatchObject({ code: 'INVALID_CHOICE' });
+    const forced = clone(battle);
+    forced.session.runtime.requests.a.forceSwitch = true;
+    forced.revision++;
+    await repo.compareAndSwap(forced, battle.revision);
+    battle = forced;
+    await expect(pvp.command(actors[1], command())).rejects.toMatchObject({
+      code: 'INVALID_CHOICE',
+    });
+    expect((await wallets.get(2)).items).toMatchObject({
+      'max-revive': 2,
+      'rare-candy': 2,
+    });
+  });
+  it('keeps a legacy battle inventory unchanged and treats its missing Max Revive budget as zero', async () => {
+    await start();
+    const legacy = clone(battle);
+    delete legacy.itemInventory.a['max-revive'];
+    delete legacy.itemInventory.b['max-revive'];
+    legacy.revision++;
+    await repo.compareAndSwap(legacy, battle.revision);
+    battle = legacy;
+    const originalSnapshots = clone(battle.players);
+    const sync = await pvp.sync(actors[1], { battleId: battle.battleId });
+    expect(sync.state.itemInventory.a).not.toHaveProperty('max-revive');
+    expect((await repo.get(battle.battleId)).players).toEqual(
+      originalSnapshots,
+    );
+    await expect(pvp.command(actors[1], command())).rejects.toMatchObject({
+      code: 'ITEM_UNAVAILABLE',
+    });
+    expect((await wallets.get(2)).items['max-revive']).toBe(2);
+  });
+  it('recovers a Max Revive checkpoint after its wallet debit without repeating either revival or stock consumption', async () => {
+    await start();
+    const queued = await pvp.command(actors[1], command());
+    const payload = resolved(queued);
+    const cas = repo.compareAndSwap.bind(repo);
+    let interrupted = true;
+    repo.compareAndSwap = async (next, revision) => {
+      if (
+        interrupted &&
+        !next.pendingInventoryCheckpoint &&
+        next.session?.networkItems?.used?.includes('revive-command')
+      ) {
+        interrupted = false;
+        throw new Error(
+          'Max Revive saved wallet before lost checkpoint response',
+        );
+      }
+      return cas(next, revision);
+    };
+    await expect(pvp.checkpoint(actors[1], payload)).rejects.toThrow(
+      'Max Revive saved wallet',
+    );
+    expect((await wallets.get(2)).items['max-revive']).toBe(1);
+    expect(
+      (await repo.get(battle.battleId)).pendingInventoryCheckpoint.charges[0],
+    ).toMatchObject({ itemId: 'max-revive' });
+    const recovered = await pvp.sync(actors[1], { battleId: battle.battleId });
+    expect(
+      recovered.state.session.teams.a.pokemons[1].pokemon.stats[0].value,
+    ).toBe(91);
+    expect(recovered.state.itemInventory.a['max-revive']).toBe(1);
+    expect((await wallets.get(2)).battleUses).toHaveLength(1);
   });
 });

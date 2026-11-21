@@ -52,7 +52,9 @@ export class ShopCatalogService implements OnModuleInit {
   private view(row: ShopCatalogRecord): ShopCatalog {
     return {
       revision: row.revision,
-      prices: clone(row.prices),
+      // New items receive their initial prices without overwriting existing
+      // administrator edits, changing revisions or rewriting old receipts.
+      prices: { ...SHOP_CATALOG, ...clone(row.prices) },
       captureDifficulty: row.captureDifficulty ?? 0,
       automaticOpponents: row.automaticOpponents ?? false,
     };

@@ -341,6 +341,57 @@ describe('Authoritative Pokedollars and purchases', () => {
       ),
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
+  it('adds the two 300 PD items to old catalogues without resetting custom prices and persists later administrator edits', async () => {
+    const legacy: any = await service.catalog.repository.get();
+    delete legacy.prices['max-revive'];
+    delete legacy.prices['rare-candy'];
+    legacy.prices['full-restore'] = 123;
+    legacy.prices['poke-ball'] = 0;
+    await service.catalog.repository.compareAndSwap(legacy, legacy.revision);
+    const visible = await service.catalog.snapshot();
+    expect(visible.prices).toMatchObject({
+      'max-revive': 300,
+      'rare-candy': 300,
+      'full-restore': 123,
+      'poke-ball': 0,
+    });
+    expect(await service.catalog.repository.get()).toEqual(legacy);
+    for (const [index, itemId] of ['max-revive', 'rare-candy'].entries()) {
+      const response = await service.priceSet(
+        clients[1],
+        priceInput({
+          requestId: `new-item-price-${itemId}`,
+          itemId,
+          price: index === 0 ? 0 : 444,
+          expectedCatalogRevision: index,
+        }),
+      );
+      expect(response.catalog.prices[itemId]).toBe(index === 0 ? 0 : 444);
+    }
+    const restarted = new ShopCatalogService(service.catalog.repository);
+    await restarted.onModuleInit();
+    expect((await restarted.snapshot()).prices).toMatchObject({
+      'max-revive': 0,
+      'rare-candy': 444,
+      'full-restore': 123,
+      'poke-ball': 0,
+    });
+    const bought = await service.purchase(
+      clients[1],
+      input({
+        itemId: 'rare-candy',
+        expectedCatalogRevision: 2,
+      }),
+    );
+    expect(bought.purchases[0]).toMatchObject({
+      itemId: 'rare-candy',
+      unitPrice: 444,
+      total: 444,
+    });
+    expect(
+      bought.players.find((entry) => entry.user.id === 2).wallet.balance,
+    ).toBe(56);
+  });
   it('rejects a price changed during player preparation without charging', async () => {
     service.setPrepareHandler(async (_owner, request) => {
       await service.catalog.setPrice(1, priceInput({ price: 200 }));
@@ -525,6 +576,8 @@ describe('Authoritative Pokedollars and purchases', () => {
   it.each([
     ['max-ether', 350],
     ['max-elixir', 700],
+    ['max-revive', 300],
+    ['rare-candy', 300],
   ] as const)(
     'sells %s at its authoritative catalog price %i',
     async (itemId, unitPrice) => {
@@ -1292,13 +1345,15 @@ describe('Full Restore local inventory use', () => {
     expect((await repo.get(2)).items['full-restore']).toBe(2);
     expect((await repo.get(2)).uses ?? []).toEqual([]);
   });
-  it.each(['max-ether', 'max-elixir'] as const)(
+  it.each(['max-ether', 'max-elixir', 'max-revive', 'rare-candy'] as const)(
     'consumes only %s and binds its receipt to its exact item and move selector',
     async (itemId) => {
       repo.rows.get(2).items = {
         'full-restore': 2,
         'max-ether': 2,
         'max-elixir': 2,
+        'max-revive': 2,
+        'rare-candy': 2,
       };
       const payload = useInput({
         itemId,
@@ -1341,6 +1396,8 @@ describe('Full Restore local inventory use', () => {
     { itemId: 'max-ether', moveId: 1.5 },
     { itemId: 'max-elixir', moveId: 1 },
     { itemId: 'full-restore', moveId: 1 },
+    { itemId: 'max-revive', moveId: 1 },
+    { itemId: 'rare-candy', moveId: 1 },
   ])(
     'rejects invalid consumable or selector %j without debit',
     async (selection) => {
@@ -1357,6 +1414,27 @@ describe('Full Restore local inventory use', () => {
         .wallet.items['full-restore'],
     ).toBe(1);
     expect((await repo.get(2)).uses).toHaveLength(1);
+  });
+  it('allows a battle Max Revive but never consumes Rare Candy in a battle context', async () => {
+    repo.rows.get(2).items['max-revive'] = 2;
+    repo.rows.get(2).items['rare-candy'] = 2;
+    await service.presence(clients[2], { ready: false, localBattle: true });
+    const payload = useInput({ itemId: 'max-revive', context: 'local-battle' });
+    const used = await service.use(clients[2], payload);
+    expect(used.wallet.items['max-revive']).toBe(1);
+    expect((await service.use(clients[2], payload)).use).toEqual(used.use);
+    expect((await repo.get(2)).uses).toHaveLength(1);
+    await expect(
+      service.use(
+        clients[2],
+        useInput({
+          requestId: 'candy-in-battle',
+          itemId: 'rare-candy',
+          context: 'local-battle',
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'PLAYER_IN_BATTLE' });
+    expect((await repo.get(2)).items['rare-candy']).toBe(2);
   });
   it('persists a Max Ether cancellation bound to its move and prevents late consumption', async () => {
     repo.rows.get(2).items['max-ether'] = 1;
@@ -1845,6 +1923,8 @@ describe('Background local inventory consumption batches', () => {
       'full-restore': 3,
       'max-ether': 2,
       'max-elixir': 2,
+      'max-revive': 2,
+      'rare-candy': 2,
       tm: 2,
       'poke-ball': 2,
       'great-ball': 2,
@@ -1895,6 +1975,8 @@ describe('Background local inventory consumption batches', () => {
       'full-restore',
       'max-ether',
       'max-elixir',
+      'max-revive',
+      'rare-candy',
       'tm',
       'poke-ball',
       'great-ball',
@@ -1908,7 +1990,7 @@ describe('Background local inventory consumption batches', () => {
     );
     const quote = jest.spyOn(service.catalog, 'quote');
     const result = await service.consumeBatch(clients[2], batch(requests));
-    expect(result.consumptions).toHaveLength(7);
+    expect(result.consumptions).toHaveLength(9);
     expect(
       result.consumptions.every((entry) => entry.status === 'accepted'),
     ).toBe(true);
@@ -1918,12 +2000,14 @@ describe('Background local inventory consumption batches', () => {
     expect(result.wallet).toMatchObject({
       balance: 500,
       revision: 1,
-      consumptionAck: { clientId: clients[2].clientId, throughSequence: 7 },
+      consumptionAck: { clientId: clients[2].clientId, throughSequence: 9 },
     });
     expect((await repo.get(2)).uses).toEqual([]);
-    expect((await repo.get(2)).consumptions).toHaveLength(7);
+    expect((await repo.get(2)).consumptions).toHaveLength(9);
     expect((await repo.get(2)).items['full-restore']).toBe(2);
     expect((await repo.get(2)).items.tm).toBe(1);
+    expect((await repo.get(2)).items['max-revive']).toBe(1);
+    expect((await repo.get(2)).items['rare-candy']).toBe(1);
     await expect(activity.assertAvailable([2])).resolves.toBeUndefined();
     expect(quote).not.toHaveBeenCalled();
   });
@@ -2064,6 +2148,9 @@ describe('Background local inventory consumption batches', () => {
       [operation(1, { itemId: 'poke-ball' })],
       [operation(1, { moveId: 1 })],
       [operation(1, { itemId: 'max-ether', moveId: 355 })],
+      [operation(1, { itemId: 'max-revive', moveId: 33 })],
+      [operation(1, { itemId: 'rare-candy', moveId: 33 })],
+      [operation(1, { itemId: 'rare-candy', context: 'local-battle' })],
       [operation(1, { planHash: 'anything' })],
       [operation(1), operation(2, { operationId: 'local-1' })],
     ];

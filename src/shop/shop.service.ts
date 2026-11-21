@@ -2042,8 +2042,14 @@ export class ShopService implements OnModuleInit {
       !/^[a-f0-9]{64}$/.test(payload.planHash)
     )
       fail('INVALID_INPUT', 'El plan de uso del objeto no es válido.');
-    if (itemId === 'tm' && payload.context !== 'party')
-      fail('PLAYER_IN_BATTLE', 'Las TM sólo se pueden usar fuera de combate.');
+    if (
+      (itemId === 'tm' || itemId === 'rare-candy') &&
+      payload.context !== 'party'
+    )
+      fail(
+        'PLAYER_IN_BATTLE',
+        'Este objeto sólo se puede usar fuera de combate.',
+      );
     if (BALL_ITEM_IDS.includes(itemId) && payload.context !== 'local-battle')
       fail(
         'PLAYER_IN_BATTLE',
@@ -2137,7 +2143,8 @@ export class ShopService implements OnModuleInit {
       else if (operation.moveId !== undefined)
         fail('INVALID_INPUT', 'Este objeto no admite un movimiento objetivo.');
       if (
-        (operation.itemId === 'tm' && operation.context !== 'party') ||
+        ((operation.itemId === 'tm' || operation.itemId === 'rare-candy') &&
+          operation.context !== 'party') ||
         (BALL_ITEM_IDS.includes(operation.itemId) &&
           operation.context !== 'local-battle')
       )

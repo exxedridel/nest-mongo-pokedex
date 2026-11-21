@@ -855,6 +855,17 @@ export class PvpService implements OnModuleInit {
             'INVALID_CHOICE',
             'El movimiento objetivo no pertenece a ese Pokémon.',
           );
+        if (
+          choice.item === 'max-revive' &&
+          !team.pokemons.some(
+            (capture: any) =>
+              capture.captureId === choice.captureId && hp(capture) === 0,
+          )
+        )
+          fail(
+            'INVALID_CHOICE',
+            'Max Revive sólo se puede usar en un Pokémon debilitado.',
+          );
         if (this.battleItemCount(battle, payload.side, choice.item) < 1)
           fail(
             'ITEM_UNAVAILABLE',

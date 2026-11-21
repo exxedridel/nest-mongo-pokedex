@@ -5,7 +5,31 @@ comunica las instancias React por Socket.IO. `/mensajes-prueba` permite elegir
 cualquier otro usuario registrado y conversar en privado. No hay una lista fija
 de dos correos. Las batallas y la Tienda usan los namespaces descritos abajo.
 
+## Max Revive y Rare Candy (React2.20)
+
+`max-revive` y `rare-candy` se compran y regalan con precio inicial300 PD cada
+uno; Back office permite editarlo, incluido0. La vista del catálogo completa
+precios ausentes sin reiniciar personalizaciones ni su revisión.
+
+Max Revive amplía el conjunto de objetos de batalla y exige un objetivo con0HP,
+stock y acción libre en JcJ/Trainer. El checkpoint conserva el débito central
+idempotente. Rare Candy pertenece únicamente a Party; `shop:use` y
+`shop:consume-batch` rechazan contexto de batalla y `moveId`. El frontend aplica
+los efectos locales y mantiene los consumos en segundo plano. No se traslada
+el motor al servidor. Inventarios legacy sin el objeto nuevo conservan su hash.
+
+Desplegar Nest antes de React y recargar ambos frontends a2.20.0. Sin variables,
+MySQL, seed, reinicios ni borrados. Ver
+[LOCAL_ITEM_SYNC_PROTOCOL.md](../LOCAL_ITEM_SYNC_PROTOCOL.md).
+
 ## Recompensas automáticas de combate
+
+Desde React 2.21, los eventos nuevos de KO llevan `levelRuleVersion:2` y dan dos
+niveles cuando el rival es igual o mayor; uno si es menor. El validador exige
+el premio exacto por evento. Los guardados sin marca conservan la regla anterior
+y sus hashes, sin recalcular premios; se admiten prefijos legacy con eventos
+nuevos tras reconectar. `ledger.version` sigue en 1 y Rare Candy mantiene su +1.
+Desplegar Nest antes de React y recargar ambos frontends a 2.21.0.
 
 React2.14.0 permite niveles durante nuevas batallas administrativas. Create
 declara `levelRewards:'immediate'`; el ledger marca el lote aplicado y Nest

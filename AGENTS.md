@@ -1,5 +1,23 @@
 # Contexto de la trilogia Pokemon
 
+Etapa vigente 2026-11-20 React 2.21/Nest: checkpoints aceptan evento opcional
+levelRuleVersion:2 con rival>=vencedor +2, menor +1. Ausente usa regla legacy >;
+rechazar otras versiones/premios incorrectos, conservar prefix/hash/ledger1.
+Batallas mixtas/recovery diferido e inmediato y cap100/PPstatus probados.
+83PvP/build PASS; React225core47wallet11Party7cuentas/TS/build/audit177 y
+ChromeRewards6/OpponentAuto3 PASS sinJSerrors/cleanup. UI manual niveles comentada; Candy+1
+intacto. Ver Punto/protocolo. Nest→React/recargar2.21 sinvars/MySQL/seed/reset/
+borrados/commit/push/deploy; producción no verificada. Preservar2.20previo.
+
+Etapa vigente2026-11-20 React2.20/Nest: max-revive/rare-candy300PDcatalog/shop/gift/
+editprecio0permitido; vistaadditiva conservaDoccustom/rev sinreset. MR4ºConsumable
+adminrequieretargetHP0/stock/freeaction y1debitcheckpointidempotente; Candyonly
+partyUSABLE/moveIdprohibido enuse/BG, no motorservidor. LegacybudgetsmissingMR=0
+lookup/norewritehash niobsoletos.277Shop76PvP/buildPASS. React80core47wallet4catalog/
+7accounts11Party/TS/build/audit177 yChromeNewItems5+ShopCOMPLETOPASSsinJSerrors/cleanup.
+VerPunto/LOCAL_ITEM_SYNC/SHOP_PROTOCOL. Nest→Reactrecargar2.20sinvars/MySQL/seed/
+reset/borrados/commit/push/deploy, producciónnoverificada.
+
 Etapa vigente2026-11-20 React2.19/Nest: primerRivalLabv2=250PD+1GreatBall/3variantes.
 rewardBundleVersion1|2 en schema/create/pending/recovery, CAScash+GB+receipt/dedupe.
 trainerPresetReward default/v1LAB500 INTENCIONALlegacyhash/oldpending, v2LAB250.

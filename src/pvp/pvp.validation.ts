@@ -628,6 +628,7 @@ export function validateSession(session: any, battle: Battle) {
         'winnerLevel',
         'defeatedLevel',
         'levels',
+        'levelRuleVersion',
       ]);
       id(entry.id);
       if (
@@ -661,7 +662,18 @@ export function validateSession(session: any, battle: Battle) {
           (immediate
             ? defeatedBefore?.pokemon.level
             : defeated.pokemon.level) !== entry.defeatedLevel) ||
-        entry.levels !== (entry.defeatedLevel > entry.winnerLevel ? 2 : 1)
+        (entry.levelRuleVersion !== undefined &&
+          entry.levelRuleVersion !== 2) ||
+        // Unmarked saved events keep their original strict-greater rule. New
+        // events opt in individually, so a resumed ledger can contain both.
+        entry.levels !==
+          (entry.levelRuleVersion === 2
+            ? entry.defeatedLevel >= entry.winnerLevel
+              ? 2
+              : 1
+            : entry.defeatedLevel > entry.winnerLevel
+              ? 2
+              : 1)
       )
         fail(
           'INVALID_CHECKPOINT',

@@ -13,6 +13,8 @@ export const SHOP_CATALOG = {
   'full-restore': 350,
   'max-ether': 350,
   'max-elixir': 700,
+  'max-revive': 300,
+  'rare-candy': 300,
   tm: 500,
   bicycle: 1200,
 } as const;
@@ -80,6 +82,7 @@ export const CONSUMABLE_ITEM_IDS = [
   'full-restore',
   'max-ether',
   'max-elixir',
+  'max-revive',
 ] as const;
 export type ConsumableItemId = (typeof CONSUMABLE_ITEM_IDS)[number];
 export const BALL_ITEM_IDS = ['poke-ball', 'great-ball', 'ultra-ball'] as const;
@@ -88,6 +91,7 @@ export type BallItemId = (typeof BALL_ITEM_IDS)[number];
 export const USABLE_ITEM_IDS = [
   ...CONSUMABLE_ITEM_IDS,
   'tm',
+  'rare-candy',
   ...BALL_ITEM_IDS,
 ] as const;
 export type UsableItemId = (typeof USABLE_ITEM_IDS)[number];
