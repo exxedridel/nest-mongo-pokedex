@@ -160,6 +160,8 @@ export type GameReset = {
   userId: number;
   clientId: string;
   walletRevision: number;
+  /** New reset intents grant six normal Poké Balls; absent preserves legacy. */
+  starterItemsVersion?: 1;
   status: 'pending' | 'applied' | 'cancelled';
 };
 export type StoredGameReset = GameReset & { requestHash: string };
@@ -227,6 +229,8 @@ export type ShopPlayer = {
   pendingConsumption?: boolean;
 };
 export type ShopState = {
+  /** Capability advertisement only; never stored in wallets or catalogues. */
+  resetStarterItemsVersion?: 1;
   rewards?: CombatReward[];
   consumptions?: ConsumptionResult[];
   catalog?: ShopCatalog;

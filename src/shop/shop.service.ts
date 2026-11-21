@@ -390,6 +390,7 @@ export class ShopService implements OnModuleInit {
     if (actor.user.role === 'player') {
       const row = await this.ensureWallet(actor.user.id);
       return {
+        resetStarterItemsVersion: 1,
         catalog,
         ...(payload.centerRequestId &&
         row.centerHeals?.some(
@@ -555,6 +556,7 @@ export class ShopService implements OnModuleInit {
       ? centerHeals.find((entry) => entry.requestId === payload.centerRequestId)
       : undefined;
     return {
+      resetStarterItemsVersion: 1,
       catalog,
       players,
       centerHeals: centerHeals
@@ -2834,9 +2836,18 @@ export class ShopService implements OnModuleInit {
   }
 
   async reset(actor: Actor, payload: any): Promise<ShopState> {
-    object(payload, ['requestId', 'expectedWalletRevision']);
+    object(payload, [
+      'requestId',
+      'expectedWalletRevision',
+      'starterItemsVersion',
+    ]);
     id(payload.requestId);
     integer(payload.expectedWalletRevision);
+    if (
+      payload.starterItemsVersion !== undefined &&
+      payload.starterItemsVersion !== 1
+    )
+      fail('INVALID_INPUT', 'Versión de objetos iniciales no válida.');
     this.self(actor);
     if (actor.user.role !== 'player')
       fail('PLAYER_REQUIRED', 'Sólo el jugador puede reiniciar su partida.');
@@ -2844,6 +2855,7 @@ export class ShopService implements OnModuleInit {
       actor.user.id,
       actor.clientId,
       payload.expectedWalletRevision,
+      ...(payload.starterItemsVersion === 1 ? ['starter-items-v1'] : []),
     ]);
     const reset = await this.activity.runExclusive(
       [actor.user.id],
@@ -2912,10 +2924,14 @@ export class ShopService implements OnModuleInit {
             userId: actor.user.id,
             clientId: actor.clientId,
             walletRevision: row.revision + 1,
+            ...(payload.starterItemsVersion === 1
+              ? { starterItemsVersion: 1 as const }
+              : {}),
             status: 'pending',
           };
           row.balance = 500;
-          row.items = {};
+          row.items =
+            payload.starterItemsVersion === 1 ? { 'poke-ball': 6 } : {};
           if (!Number.isSafeInteger((row.rewardEpoch ?? 0) + 1))
             fail(
               'WALLET_CONFLICT',
@@ -2946,9 +2962,18 @@ export class ShopService implements OnModuleInit {
   }
 
   async resetCancel(actor: Actor, payload: any): Promise<ShopState> {
-    object(payload, ['requestId', 'expectedWalletRevision']);
+    object(payload, [
+      'requestId',
+      'expectedWalletRevision',
+      'starterItemsVersion',
+    ]);
     id(payload.requestId);
     integer(payload.expectedWalletRevision);
+    if (
+      payload.starterItemsVersion !== undefined &&
+      payload.starterItemsVersion !== 1
+    )
+      fail('INVALID_INPUT', 'Versión de objetos iniciales no válida.');
     this.self(actor);
     if (actor.user.role !== 'player')
       fail(
@@ -2959,6 +2984,7 @@ export class ShopService implements OnModuleInit {
       actor.user.id,
       actor.clientId,
       payload.expectedWalletRevision,
+      ...(payload.starterItemsVersion === 1 ? ['starter-items-v1'] : []),
     ]);
     const reset = await this.activity.runExclusive(
       [actor.user.id],
@@ -3000,6 +3026,9 @@ export class ShopService implements OnModuleInit {
             userId: actor.user.id,
             clientId: actor.clientId,
             walletRevision: row.revision,
+            ...(payload.starterItemsVersion === 1
+              ? { starterItemsVersion: 1 as const }
+              : {}),
             status: 'cancelled',
           };
           (row.resets ??= []).push({ ...receipt, requestHash });

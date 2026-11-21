@@ -79,6 +79,8 @@ const resetInput = (overrides: Record<string, any> = {}) => ({
   expectedWalletRevision: 0,
   ...overrides,
 });
+const starterResetInput = (overrides: Record<string, any> = {}) =>
+  resetInput({ starterItemsVersion: 1, ...overrides });
 
 describe('Authoritative Pokedollars and purchases', () => {
   let auth: ReturnType<typeof fakeAuth>,
@@ -879,6 +881,223 @@ describe('Authoritative Pokedollars and purchases', () => {
     });
     expect(restored.purchases[0].status).toBe('pending');
     expect(restored.wallet.items['poke-ball']).toBe(1);
+  });
+  it('grants exactly six normal balls and 500 PD on the new reset contract, clears other stock, and never replenishes a consumed ball on replay or sync', async () => {
+    const purchase = (await service.purchase(clients[1], input())).purchases[0];
+    await service.applied(clients[2], {
+      purchaseId: purchase.purchaseId,
+      revision: 1,
+    });
+    repo.rows.get(2).items = Object.fromEntries(
+      Object.keys(SHOP_CATALOG).map((itemId) => [itemId, 4]),
+    );
+    repo.rows.get(2).badges = ['boulder'];
+    const payload = starterResetInput({ expectedWalletRevision: 1 });
+    const result = await service.reset(clients[2], payload);
+    expect(result.wallet).toMatchObject({
+      balance: 500,
+      revision: 2,
+      rewardEpoch: 1,
+      badges: [],
+    });
+    expect(result.wallet.items).toEqual({ 'poke-ball': 6 });
+    expect(result.reset).toEqual({
+      requestId: 'reset-1',
+      userId: 2,
+      clientId: clients[2].clientId,
+      walletRevision: 2,
+      starterItemsVersion: 1,
+      status: 'pending',
+    });
+    expect(result.purchases).toEqual([{ ...purchase, status: 'applied' }]);
+    expect(await activity.busyUsers([2])).toEqual([2]);
+    const stored = await repo.get(2);
+    expect(stored.resets[0].requestHash).toBe(
+      digest([2, clients[2].clientId, 1, 'starter-items-v1']),
+    );
+    expect((await service.reset(clients[2], payload)).wallet.items).toEqual({
+      'poke-ball': 6,
+    });
+    expect(await repo.get(2)).toEqual(stored);
+    await service.resetApplied(clients[2], {
+      requestId: 'reset-1',
+      revision: 2,
+    });
+    await service.presence(clients[2], {
+      ready: false,
+      localBattle: true,
+      supportsBackgroundItemUses: true,
+    });
+    await service.consumeBatch(clients[2], {
+      clientId: clients[2].clientId,
+      operations: [
+        {
+          operationId: 'spent-starter-ball',
+          sequence: 1,
+          itemId: 'poke-ball',
+          quantity: 1,
+          captureId: 'local-pokemon',
+          context: 'local-battle',
+        },
+      ],
+    });
+    const spent = await repo.get(2);
+    expect(spent.items).toEqual({ 'poke-ball': 5 });
+    expect((await service.reset(clients[2], payload)).wallet.items).toEqual({
+      'poke-ball': 5,
+    });
+    await service.resetApplied(clients[2], {
+      requestId: 'reset-1',
+      revision: 2,
+    });
+    await service.sync(clients[2]);
+    await service.sync(clients[1]);
+    service.disconnect(clients[2].socketId);
+    service.connect(clients[2]);
+    await service.presence(clients[2], { ready: true, localBattle: false });
+    expect(await repo.get(2)).toEqual(spent);
+  });
+  it('keeps initial and existing wallets untouched when clients connect, sync or open the shop without a reset', async () => {
+    const initial = await service.sync(clients[3]);
+    expect(initial.wallet.items).toEqual({});
+    expect(initial.resetStarterItemsVersion).toBe(1);
+    repo.rows.get(2).balance = 321;
+    repo.rows.get(2).items = { 'poke-ball': 2, tm: 3 };
+    const original = await repo.get(2);
+    const catalogue = await service.catalog.repository.get();
+    expect((await service.sync(clients[1])).resetStarterItemsVersion).toBe(1);
+    await service.sync(clients[2]);
+    service.disconnect(clients[2].socketId);
+    service.connect(clients[2]);
+    await service.presence(clients[2], { ready: true, localBattle: false });
+    expect(await repo.get(2)).toEqual(original);
+    expect((await repo.get(3)).items).toEqual({});
+    expect(await service.catalog.repository.get()).toEqual(catalogue);
+  });
+  it('recovers one new starter reset after concurrent requests and process restart, and retries a failed ACK without another grant', async () => {
+    const payload = starterResetInput();
+    const results = await Promise.all([
+      service.reset(clients[2], payload),
+      service.reset(clients[2], payload),
+    ]);
+    expect(results[0].reset).toEqual(results[1].reset);
+    expect((await repo.get(2)).resets).toHaveLength(1);
+    const pending = await repo.get(2);
+    service = new ShopService(repo, auth as any, activity);
+    await service.onModuleInit();
+    service.connect(clients[2]);
+    expect((await service.sync(clients[2])).resets[0]).toEqual(
+      results[0].reset,
+    );
+    expect((await service.reset(clients[2], payload)).wallet.items).toEqual({
+      'poke-ball': 6,
+    });
+    expect(await repo.get(2)).toEqual(pending);
+    const cas = repo.compareAndSwap.bind(repo);
+    repo.compareAndSwap = async () => {
+      throw new Error('Starter reset ACK write unavailable');
+    };
+    await expect(
+      service.resetApplied(clients[2], { requestId: 'reset-1', revision: 1 }),
+    ).rejects.toThrow('Starter reset ACK');
+    expect(await repo.get(2)).toEqual(pending);
+    repo.compareAndSwap = cas;
+    await service.resetApplied(clients[2], {
+      requestId: 'reset-1',
+      revision: 1,
+    });
+    const applied = await repo.get(2);
+    expect(applied.items).toEqual({ 'poke-ball': 6 });
+    expect(applied.resets[0]).toMatchObject({
+      starterItemsVersion: 1,
+      status: 'applied',
+    });
+    await service.resetApplied(clients[2], {
+      requestId: 'reset-1',
+      revision: 1,
+    });
+    expect(await repo.get(2)).toEqual(applied);
+  });
+  it.each(['pending', 'applied'] as const)(
+    'preserves a saved legacy %s reset, its original hash and empty inventory without retroactively granting balls',
+    async (status) => {
+      await service.reset(clients[2], resetInput());
+      if (status === 'applied')
+        await service.resetApplied(clients[2], {
+          requestId: 'reset-1',
+          revision: 1,
+        });
+      const original = await repo.get(2);
+      expect(original.resets[0].requestHash).toBe(
+        digest([2, clients[2].clientId, 0]),
+      );
+      expect(original.resets[0]).not.toHaveProperty('starterItemsVersion');
+      service = new ShopService(repo, auth as any, activity);
+      await service.onModuleInit();
+      service.connect(clients[2]);
+      expect(
+        (await service.reset(clients[2], resetInput())).wallet.items,
+      ).toEqual({});
+      await service.sync(clients[2]);
+      await expect(
+        service.reset(clients[2], starterResetInput()),
+      ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+      await expect(
+        service.resetCancel(clients[2], starterResetInput()),
+      ).rejects.toMatchObject({ code: 'REQUEST_CONFLICT' });
+      expect(await repo.get(2)).toEqual(original);
+    },
+  );
+  it('binds the starter version to cancellation tombstones and never grants items for a cancelled or changed request', async () => {
+    const payload = starterResetInput();
+    const cancelled = await service.resetCancel(clients[2], payload);
+    expect(cancelled.reset).toMatchObject({
+      starterItemsVersion: 1,
+      status: 'cancelled',
+      walletRevision: 0,
+    });
+    expect(cancelled.wallet.items).toEqual({});
+    const original = await repo.get(2);
+    expect((await service.reset(clients[2], payload)).reset).toEqual(
+      cancelled.reset,
+    );
+    for (const execute of [
+      () => service.reset(clients[2], resetInput()),
+      () => service.resetCancel(clients[2], resetInput()),
+    ])
+      await expect(execute()).rejects.toMatchObject({
+        code: 'REQUEST_CONFLICT',
+      });
+    expect(await repo.get(2)).toEqual(original);
+    const next = starterResetInput({ requestId: 'starter-reset-2' });
+    const committed = await service.reset(clients[2], next);
+    expect((await service.resetCancel(clients[2], next)).reset).toEqual(
+      committed.reset,
+    );
+    expect((await repo.get(2)).items).toEqual({ 'poke-ball': 6 });
+    expect(await activity.busyUsers([2])).toEqual([2]);
+  });
+  it('rejects invalid starter versions before mutation and retries the new reset CAS with exactly one initial inventory', async () => {
+    const original = await repo.get(2);
+    for (const starterItemsVersion of [0, 2, -1, 1.5, null, '1', true, {}])
+      for (const execute of [
+        () => service.reset(clients[2], resetInput({ starterItemsVersion })),
+        () =>
+          service.resetCancel(clients[2], resetInput({ starterItemsVersion })),
+      ])
+        await expect(execute()).rejects.toMatchObject({
+          code: 'INVALID_INPUT',
+        });
+    expect(await repo.get(2)).toEqual(original);
+    const cas = repo.compareAndSwap.bind(repo);
+    let attempts = 0;
+    repo.compareAndSwap = async (...args) =>
+      ++attempts === 1 ? false : cas(...args);
+    const result = await service.reset(clients[2], starterResetInput());
+    expect(attempts).toBe(2);
+    expect(result.wallet.items).toEqual({ 'poke-ball': 6 });
+    expect((await repo.get(2)).resets).toHaveLength(1);
+    expect((await repo.get(2)).rewardEpoch).toBe(1);
   });
   it('resets spent money and purchased items atomically, keeps purchase history and never replenishes on replay', async () => {
     const purchase = (await service.purchase(clients[1], input())).purchases[0];
@@ -3451,6 +3670,39 @@ describe('Shop Socket.IO authenticated namespace', () => {
         )
       ).error.code,
     ).toBe('SESSION_REVOKED');
+  });
+  it('advertises the new reset contract and delivers six starter balls over Socket.IO exactly once', async () => {
+    const player = await connect(2),
+      admin = await connect(1);
+    const initial = await emit(player, 'shop:sync', {});
+    expect(initial.resetStarterItemsVersion).toBe(1);
+    expect(initial.wallet.items).toEqual({});
+    expect((await emit(admin, 'shop:sync', {})).resetStarterItemsVersion).toBe(
+      1,
+    );
+    const payload = starterResetInput();
+    const first = await emit(player, 'shop:reset', payload);
+    expect(first.ok).toBe(true);
+    expect(first.wallet.items).toEqual({ 'poke-ball': 6 });
+    expect(first.reset).toMatchObject({
+      starterItemsVersion: 1,
+      walletRevision: 1,
+      status: 'pending',
+    });
+    const replay = await emit(player, 'shop:reset', payload);
+    expect(replay.reset).toEqual(first.reset);
+    expect(replay.wallet.items).toEqual({ 'poke-ball': 6 });
+    const ack = await emit(player, 'shop:reset-applied', {
+      requestId: 'reset-1',
+      revision: 1,
+    });
+    expect(ack.ok).toBe(true);
+    expect(ack.wallet).toMatchObject({ balance: 500, revision: 1 });
+    expect(ack.wallet.items).toEqual({ 'poke-ball': 6 });
+    expect(ack.resets[0]).toMatchObject({
+      starterItemsVersion: 1,
+      status: 'applied',
+    });
   });
   it('publishes cancellation receipts and refuses execution of the same request afterwards', async () => {
     const player = await connect(2);

@@ -243,12 +243,21 @@ esperar esa lectura antes de devolver el ACK de PREPARE.
 
 ### Reinicio de partida
 
-`shop:reset {requestId,expectedWalletRevision}` sólo acepta al jugador de la
+`shop:reset {requestId,expectedWalletRevision,starterItemsVersion?:1}` sólo acepta al jugador de la
 sesión actual. Verifica identidad, propietario, revisión y ausencia de batalla
 o compra pendiente usando la misma cola compartida. Una escritura CAS guarda
-saldo500, `items:{}`, revisión incrementada y recibo de reinicio `pending`.
+saldo500, `items:{'poke-ball':6}` para la versión1, revisión incrementada y recibo
+de reinicio `pending`. Se vacían los otros objetos. Sin versión conserva el
+contrato anterior (`items:{}`), incluidos su hash y sus recibos existentes.
 No borra compras, recibos ni batallas. `resets` es opcional en wallets anteriores;
 el schema preserva los objetos vacíos y no necesita seed ni migración destructiva.
+
+Reset y cancelación vinculan la misma versión, presente también en el recibo.
+Sync publica `resetStarterItemsVersion:1` sin persistirlo ni cambiar el catálogo;
+el cliente nuevo comprueba esa capacidad antes de guardar su consentimiento.
+Reintentar, reconectar o repetir ACK no repone bolas gastadas ni vuelve a sumar6.
+No hay regalos al crear/sincronizar una cartera ni cambios a partidas existentes.
+Desplegar Nest antes de React y recargar los frontends a 2.22.0.
 
 El navegador conserva una solicitud local antes de enviarla, reinicia su Party
 una sola vez mediante guardado comprobado y confirma con

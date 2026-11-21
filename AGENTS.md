@@ -1,5 +1,15 @@
 # Contexto de la trilogia Pokemon
 
+Etapa vigente 2026-11-21 React2.22/Nest: reset/cancel starterItemsVersion?:1,
+tag1 CAS500+items{'poke-ball':6}/epoch++/pending; ausencia legacy500/{} conhash
+original. Tagrequesthashdominiopropio/versionbind evita retarget; replay/ACK/
+restart/CASfallo/cancel no duplicangrant. Syncstaticcap resetStarterItemsVersion1
+player/admin sinmutarwallet/catálogo. Walletcreation500/{}intacta/no grantSync.
+285Shop86PvP/build/formato PASS; React50wallet11Party7cuentas/TS/build/audit177
+y ChromeReset PASS sinJSerrors/cleanup (stock6exacto/reload/retry/oldserverguard).
+Ver Punto/SHOP_PROTOCOL. Nest→React/recargar2.22 sinvars/MySQL/seed/reset/
+borrados/commit/push/deploy; producción no verificada.
+
 Corrección vigente 2026-11-21 React 2.21.1/Nest: FullRestore nuevo exige target
 HP>0 después de commandHashes/replay y antes de autorizar inventario. HP0
 rechazado sin mutar batalla/stock/cola; MaxReviveKO-only intacto. Comandos
