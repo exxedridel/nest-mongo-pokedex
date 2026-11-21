@@ -287,8 +287,14 @@ al flujo local; `CONSUMABLE_ITEM_IDS` permanece limitado a los tres objetos de
 batalla. TM se rechaza en comandos y débitos de combate. Las dos elecciones
 iniciales gratuitas son locales y no usan este recibo.
 
-En `/pvp`, sólo se aceptan elecciones item de los humanos con stock. Elegirlo
-reserva la acción sin descontar la unidad. El adaptador admin registra el comando
+En `/pvp`, sólo se aceptan elecciones item de los humanos con stock.
+Full Restore exige que el objetivo tenga HP mayor que 0; para los debilitados
+se usa Max Revive. El rechazo ocurre antes de autorizar la acción o el inventario.
+La deduplicación previa conserva las operaciones ya autorizadas y su recuperación.
+Desplegar Nest antes de React y recargar ambos frontends a 2.21.1.
+
+Elegir un objeto válido reserva la acción sin descontar la unidad.
+El adaptador admin registra el comando
 cuando se ejecuta el evento nativo; el checkpoint identifica esos comandos en
 `networkItems.used`. Nest valida su pertenencia y persiste un checkpoint pendiente
 antes de debitar cada wallet por clave batalla/comando. Al terminar el débito

@@ -856,6 +856,17 @@ export class PvpService implements OnModuleInit {
             'El movimiento objetivo no pertenece a ese Pokémon.',
           );
         if (
+          choice.item === 'full-restore' &&
+          !team.pokemons.some(
+            (capture: any) =>
+              capture.captureId === choice.captureId && hp(capture) > 0,
+          )
+        )
+          fail(
+            'INVALID_CHOICE',
+            'Full Restore no se puede usar en un Pokémon debilitado.',
+          );
+        if (
           choice.item === 'max-revive' &&
           !team.pokemons.some(
             (capture: any) =>

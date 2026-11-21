@@ -2488,6 +2488,28 @@ describe('Full Restore battle inventory settlement', () => {
     await pvp.checkpoint(actors[1], checkpoint(cancelled, []));
     expect(await shop.fullRestoreStock(2)).toBe(2);
   });
+  it('keeps an already authorized legacy Full Restore command replayable after its target faints', async () => {
+    const queued = await item();
+    const legacy = clone(queued);
+    legacy.session.teams.a.pokemons[0].pokemon.stats[0].value = 0;
+    legacy.revision++;
+    await repo.compareAndSwap(legacy, queued.revision);
+    const originalHashes = clone(legacy.commandHashes);
+    const replay = await item();
+    expect(replay.revision).toBe(legacy.revision);
+    expect(replay.commandHashes).toEqual(originalHashes);
+    expect(replay.commands).toEqual(legacy.commands);
+    expect(replay.lockHeld).toBe(true);
+    expect(await shop.fullRestoreStock(2)).toBe(2);
+    const payload = checkpoint(replay, ['restore-action']);
+    payload.session.teams.a.pokemons[0].pokemon.stats[0].value = 91;
+    const settled = await pvp.checkpoint(actors[1], payload);
+    expect(settled.session.teams.a.pokemons[0].pokemon.stats[0].value).toBe(91);
+    expect(await shop.fullRestoreStock(2)).toBe(1);
+    await pvp.checkpoint(actors[1], payload);
+    expect(await shop.fullRestoreStock(2)).toBe(1);
+    expect(wallets.rows.get(2).battleUses).toHaveLength(1);
+  });
   it('recovering after wallet debit and a failed checkpoint write does not debit again', async () => {
     const queued = await item(),
       payload = checkpoint(queued, ['restore-action']);
@@ -2724,6 +2746,29 @@ describe('Max Revive battle authorization and durable settlement', () => {
       processedCommandIds: ['revive-command'],
     };
   }
+  it.each(['pvp', 'trainer'] as const)(
+    'rejects a new Full Restore on a fainted reserve in %s without reserving a command or spending stock, while allowing a living target',
+    async (mode) => {
+      await start(mode);
+      const original = await repo.get(battle.battleId);
+      await expect(
+        pvp.command(actors[1], command('full-restore')),
+      ).rejects.toMatchObject({ code: 'INVALID_CHOICE' });
+      expect(await repo.get(battle.battleId)).toEqual(original);
+      expect((await wallets.get(2)).items).toMatchObject({
+        'full-restore': 2,
+        'max-revive': 2,
+      });
+      expect((await wallets.get(2)).battleUses ?? []).toEqual([]);
+      const queued = await pvp.command(
+        actors[1],
+        command('full-restore', battle.session.teams.a.activeCaptureId),
+      );
+      expect(queued.commands[0].inventoryAuthorized).toBe(true);
+      expect(queued.lockHeld).toBe(true);
+      expect((await wallets.get(2)).items['full-restore']).toBe(2);
+    },
+  );
   it.each(['pvp', 'trainer'] as const)(
     'revives a fainted reserve in %s only when its authorized effect is saved and never debits a replay twice',
     async (mode) => {

@@ -1,5 +1,14 @@
 # Contexto de la trilogia Pokemon
 
+Corrección vigente 2026-11-21 React 2.21.1/Nest: FullRestore nuevo exige target
+HP>0 después de commandHashes/replay y antes de autorizar inventario. HP0
+rechazado sin mutar batalla/stock/cola; MaxReviveKO-only intacto. Comandos
+legacy autorizados y checkpoints/recibos/planes/hash/recovery no se reescriben.
+86PvP/build PASS; React232core49wallet/TS/build/audit177 y ChromeNewItems5 PASS
+sinJSerrors/cleanup (FRKOconexistencias Party/admin, rawnative y MRnormal).
+Ver Punto/protocolos. Nest→React/recargar2.21.1 sinvars/MySQL/seed/reset/
+borrados/commit/push/deploy; producción no verificada.
+
 Etapa vigente 2026-11-20 React 2.21/Nest: checkpoints aceptan evento opcional
 levelRuleVersion:2 con rival>=vencedor +2, menor +1. Ausente usa regla legacy >;
 rechazar otras versiones/premios incorrectos, conservar prefix/hash/ledger1.
