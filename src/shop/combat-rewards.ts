@@ -35,10 +35,15 @@ export type LocalTrainerRewardClaim = {
   /** Present only for a newly enabled trainer defeat, including forfeit. */
   penaltyVersion?: 1;
 };
+export type PokemonReleaseClaim = {
+  captureId: string;
+  epoch: number;
+};
 export type CombatReward = {
   rewardId: string;
   userId: number;
-  source: 'local-trainer' | 'admin-trainer';
+  source: 'local-trainer' | 'admin-trainer' | 'pokemon-release';
+  captureId?: string;
   encounterId?: string;
   battleId?: string;
   epoch: number;

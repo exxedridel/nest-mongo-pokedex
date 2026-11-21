@@ -1,5 +1,16 @@
 # Contexto de la trilogia Pokemon
 
+Etapa vigente2026-11-21 React2.23/Nest: shop:release-claim{releases:[{captureId,
+epoch}]}strict1–100 autentica jugador/fijo150/ledgerCAS sourcepokemon-release,
+rewardIdrelease:epoch:captureId/porcuenta dedupdispositivos/reload/lostreply;
+epocholdSTALE0, stock/badgesintactos yRPCrecibosexactosfuera50. Capestática
+releaseRewardsVersion1player/admin; noParty/motorcentral, captura confiadaReact
+comoPvE existente. Oldhashesintactos.298Shop86PvP/build/formato PASS; React
+5release53wallet7cuentas11Party/TS/build/audit178 yChromeRelease4/Auto3PASSsinJSerrors/cleanup.
+UIlevelcandidatoeditable, activo/propio readonly. Ver Punto/SHOP_PROTOCOL.
+Nest→React2.23sinvars/MySQL/seed/reset/borrados/commit/push/deploy;
+producción no verificada.
+
 Etapa vigente 2026-11-21 React2.22/Nest: reset/cancel starterItemsVersion?:1,
 tag1 CAS500+items{'poke-ball':6}/epoch++/pending; ausencia legacy500/{} conhash
 original. Tagrequesthashdominiopropio/versionbind evita retarget; replay/ACK/

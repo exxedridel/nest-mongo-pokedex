@@ -13,6 +13,7 @@ import {
   LOCAL_TRAINER_REWARDS,
   LOCAL_TRAINER_PENALTIES,
   LocalTrainerRewardClaim,
+  PokemonReleaseClaim,
   trainerPresetReward,
   trainerPresetPenalty,
 } from './combat-rewards';
@@ -390,6 +391,7 @@ export class ShopService implements OnModuleInit {
     if (actor.user.role === 'player') {
       const row = await this.ensureWallet(actor.user.id);
       return {
+        releaseRewardsVersion: 1,
         resetStarterItemsVersion: 1,
         catalog,
         ...(payload.centerRequestId &&
@@ -556,6 +558,7 @@ export class ShopService implements OnModuleInit {
       ? centerHeals.find((entry) => entry.requestId === payload.centerRequestId)
       : undefined;
     return {
+      releaseRewardsVersion: 1,
       resetStarterItemsVersion: 1,
       catalog,
       players,
@@ -2454,6 +2457,47 @@ export class ShopService implements OnModuleInit {
                   nominalAmount: LOCAL_TRAINER_PENALTIES[claim.color],
                 }
               : {}),
+          })),
+        );
+      },
+    );
+    return { ...(await this.sync(actor)), rewards };
+  }
+
+  /** The Party change is already durable in React. Only its fixed payout and
+   * account/epoch/capture identity are stored here; retries return the receipt. */
+  async releaseClaim(actor: Actor, payload: any): Promise<ShopState> {
+    object(payload, ['releases']);
+    if (
+      !Array.isArray(payload.releases) ||
+      payload.releases.length < 1 ||
+      payload.releases.length > 100
+    )
+      fail('INVALID_INPUT', 'Envía de una a cien liberaciones pendientes.');
+    for (const claim of payload.releases) {
+      object(claim, ['captureId', 'epoch']);
+      id(claim.captureId);
+      integer(claim.epoch);
+    }
+    this.self(actor);
+    if (actor.user.role !== 'player')
+      fail('PLAYER_REQUIRED', 'Sólo el jugador confirma sus liberaciones.');
+    const verified = await this.auth.authenticate(actor.token);
+    if (verified.user.id !== actor.user.id || verified.user.role !== 'player')
+      fail('INVALID_PLAYER', 'La sesión ya no pertenece a un jugador vigente.');
+    const rewards = await this.activity.runExclusive(
+      [actor.user.id],
+      async () => {
+        this.self(actor);
+        return this.commitCombatRewards(
+          actor.user.id,
+          (payload.releases as PokemonReleaseClaim[]).map((claim) => ({
+            rewardId: `release:${claim.epoch}:${claim.captureId}`,
+            userId: actor.user.id,
+            source: 'pokemon-release',
+            captureId: claim.captureId,
+            epoch: claim.epoch,
+            amount: 150,
           })),
         );
       },

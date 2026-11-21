@@ -1,5 +1,6 @@
 import { PlayerActivityService } from '../src/messages/player-activity.service';
 import { Actor } from '../src/pvp/pvp.types';
+import { digest } from '../src/pvp/pvp.validation';
 import { MemoryShopRepository } from '../src/shop/shop.repository';
 import { ShopService } from '../src/shop/shop.service';
 import {
@@ -705,4 +706,340 @@ describe('Automatic combat rewards in the authoritative wallet', () => {
       );
     },
   );
+});
+
+describe('Durable fixed payouts for player-side Pokémon releases', () => {
+  let repository: MemoryShopRepository;
+  let service: ShopService;
+  let activity: PlayerActivityService;
+  let player: Actor;
+  let auth: any;
+  const claim = (captureId = 'released-pokemon', epoch = 0) => ({
+    releases: [{ captureId, epoch }],
+  });
+  beforeEach(async () => {
+    player = {
+      user: {
+        id: 2,
+        email: 'release@example.test',
+        first_name: 'Player',
+        last_name: 'Release',
+        role: 'player',
+      },
+      token: 'release-token',
+      clientId: 'release-client',
+      socketId: 'release-socket',
+    };
+    repository = new MemoryShopRepository();
+    activity = new PlayerActivityService();
+    auth = { authenticate: async () => ({ user: player.user }) };
+    service = new ShopService(repository, auth, activity);
+    await service.onModuleInit();
+    service.connect(player);
+    await service.presence(player, { ready: true, localBattle: false });
+  });
+  it('advertises support without changing a wallet, then pays exactly 150 PD while retaining stock, badges and all old receipt hashes', async () => {
+    const prior = await service.rewardClaim(player, {
+      rewards: [{ encounterId: 'prior-trainer', color: 'pink', epoch: 0 }],
+    });
+    repository.rows.get(2).items = { 'poke-ball': 3, tm: 2 };
+    repository.rows.get(2).badges = ['boulder'];
+    const before = await repository.get(2);
+    expect((await service.sync(player)).releaseRewardsVersion).toBe(1);
+    expect(await repository.get(2)).toEqual(before);
+    const first = await service.releaseClaim(player, claim());
+    expect(first.wallet.balance).toBe(850);
+    expect(first.wallet.items).toEqual(before.items);
+    expect(first.wallet.badges).toEqual(before.badges);
+    expect(first.rewards).toEqual([
+      {
+        rewardId: 'release:0:released-pokemon',
+        userId: 2,
+        source: 'pokemon-release',
+        captureId: 'released-pokemon',
+        epoch: 0,
+        amount: 150,
+        walletRevision: 2,
+        status: 'credited',
+      },
+    ]);
+    const row = await repository.get(2);
+    expect(row.rewards[0]).toEqual(before.rewards[0]);
+    expect(row.rewards[1].requestHash).toBe(
+      digest([
+        'combat-reward-v1',
+        {
+          rewardId: 'release:0:released-pokemon',
+          userId: 2,
+          source: 'pokemon-release',
+          captureId: 'released-pokemon',
+          epoch: 0,
+          amount: 150,
+        },
+      ]),
+    );
+    expect(
+      (
+        await service.rewardClaim(player, {
+          rewards: [{ encounterId: 'prior-trainer', color: 'pink', epoch: 0 }],
+        })
+      ).rewards,
+    ).toEqual(prior.rewards);
+    expect((await service.releaseClaim(player, claim())).rewards).toEqual(
+      first.rewards,
+    );
+    expect(await repository.get(2)).toEqual(row);
+  });
+  it('deduplicates simultaneous releases and repeated entries across devices by account, epoch and capture identity', async () => {
+    const alternate = {
+      ...player,
+      socketId: 'release-other-socket',
+      clientId: 'release-other-client',
+    };
+    service.connect(alternate);
+    const [first, second] = await Promise.all([
+      service.releaseClaim(player, claim()),
+      service.releaseClaim(alternate, {
+        releases: [claim().releases[0], claim().releases[0]],
+      }),
+    ]);
+    expect(second.rewards).toEqual([first.rewards[0], first.rewards[0]]);
+    expect((await repository.get(2)).balance).toBe(650);
+    expect((await repository.get(2)).rewards).toHaveLength(1);
+    expect((await repository.get(2)).revision).toBe(1);
+    await Promise.all([
+      service.releaseClaim(player, claim('second')),
+      service.releaseClaim(alternate, claim('third')),
+    ]);
+    expect((await repository.get(2)).balance).toBe(950);
+    expect((await repository.get(2)).rewards).toHaveLength(3);
+  });
+  it('keeps identical capture IDs independent across authenticated accounts', async () => {
+    const other = {
+      ...player,
+      user: { ...player.user, id: 3 },
+      token: 'other-token',
+      socketId: 'other-socket',
+      clientId: 'other-client',
+    };
+    auth.authenticate = async (token: string) => ({
+      user: token === other.token ? other.user : player.user,
+    });
+    service.connect(other);
+    await service.presence(other, { ready: true, localBattle: false });
+    const first = await service.releaseClaim(player, claim());
+    const second = await service.releaseClaim(other, claim());
+    expect(first.rewards[0].userId).toBe(2);
+    expect(second.rewards[0].userId).toBe(3);
+    expect((await repository.get(2)).balance).toBe(650);
+    expect((await repository.get(3)).balance).toBe(650);
+  });
+  it('retains exact historical receipts beyond the recent window and across a service restart', async () => {
+    const first = await service.releaseClaim(player, {
+      releases: Array.from({ length: 60 }, (_, index) => ({
+        captureId: `released-${index}`,
+        epoch: 0,
+      })),
+    });
+    const before = await repository.get(2);
+    expect((await service.sync(player)).rewards).toHaveLength(50);
+    expect(before.balance).toBe(9500);
+    service = new ShopService(repository, auth, activity);
+    await service.onModuleInit();
+    service.connect(player);
+    const replay = await service.releaseClaim(player, claim('released-0'));
+    expect(replay.rewards).toEqual([first.rewards[0]]);
+    expect(await repository.get(2)).toEqual(before);
+  });
+  it('retries a CAS collision once and recovers a lost success response without paying a second time', async () => {
+    const cas = repository.compareAndSwap.bind(repository);
+    let calls = 0;
+    repository.compareAndSwap = async (...args) => {
+      calls++;
+      if (calls === 1) return false;
+      const saved = await cas(...args);
+      if (calls === 2) throw new Error('Lost release success response');
+      return saved;
+    };
+    await expect(service.releaseClaim(player, claim())).rejects.toThrow(
+      'Lost release',
+    );
+    expect((await repository.get(2)).balance).toBe(650);
+    const committed = await repository.get(2);
+    const replay = await service.releaseClaim(player, claim());
+    expect(replay.rewards[0]).toMatchObject({
+      amount: 150,
+      status: 'credited',
+      walletRevision: 1,
+    });
+    expect(await repository.get(2)).toEqual(committed);
+    expect(calls).toBe(2);
+  });
+  it('never reports or retains a payout when its wallet write fails', async () => {
+    const original = await repository.get(2);
+    const cas = repository.compareAndSwap.bind(repository);
+    repository.compareAndSwap = async () => {
+      throw new Error('Release DB unavailable');
+    };
+    await expect(service.releaseClaim(player, claim())).rejects.toThrow(
+      'Release DB unavailable',
+    );
+    expect(await repository.get(2)).toEqual(original);
+    repository.compareAndSwap = cas;
+    expect((await service.releaseClaim(player, claim())).wallet.balance).toBe(
+      650,
+    );
+  });
+  it('waits for pending central operations without consuming a fresh identity and still permits an exact prior replay', async () => {
+    const first = await service.releaseClaim(player, claim());
+    activity.register('shop', async () => [2]);
+    await expect(
+      service.releaseClaim(player, claim('next')),
+    ).rejects.toMatchObject({ code: 'PLAYER_BUSY' });
+    expect((await service.releaseClaim(player, claim())).rewards).toEqual(
+      first.rewards,
+    );
+    expect((await repository.get(2)).rewards).toHaveLength(1);
+    activity.register('shop', async () => []);
+    expect(
+      (await service.releaseClaim(player, claim('next'))).wallet.balance,
+    ).toBe(800);
+  });
+  it('rejects stale releases after reset, preserves a pre-reset receipt, and scopes a later release of the same capture ID to the new epoch', async () => {
+    const first = await service.releaseClaim(player, claim());
+    const reset = await service.reset(player, {
+      requestId: 'release-reset',
+      expectedWalletRevision: 1,
+      starterItemsVersion: 1,
+    });
+    expect(reset.wallet).toMatchObject({ balance: 500, rewardEpoch: 1 });
+    const stale = await service.releaseClaim(
+      player,
+      claim('old-offline-release'),
+    );
+    expect(stale.rewards[0]).toMatchObject({
+      source: 'pokemon-release',
+      captureId: 'old-offline-release',
+      epoch: 0,
+      amount: 0,
+      status: 'rejected',
+      reason: 'STALE_GAME',
+      walletRevision: 2,
+    });
+    expect(stale.wallet.items).toEqual({ 'poke-ball': 6 });
+    expect((await service.releaseClaim(player, claim())).rewards).toEqual(
+      first.rewards,
+    );
+    expect((await repository.get(2)).balance).toBe(500);
+    await service.resetApplied(player, {
+      requestId: 'release-reset',
+      revision: 2,
+    });
+    const current = await service.releaseClaim(
+      player,
+      claim('released-pokemon', 1),
+    );
+    expect(current.wallet.balance).toBe(650);
+    expect(current.rewards[0].rewardId).toBe('release:1:released-pokemon');
+    const final = await repository.get(2);
+    expect(
+      (await service.releaseClaim(player, claim('old-offline-release')))
+        .rewards,
+    ).toEqual(stale.rewards);
+    expect(await repository.get(2)).toEqual(final);
+  });
+  it('does not change the release epoch on a cancelled reset and rejects future epochs with a terminal zero receipt', async () => {
+    await service.resetCancel(player, {
+      requestId: 'cancelled-reset',
+      expectedWalletRevision: 0,
+      starterItemsVersion: 1,
+    });
+    expect((await service.releaseClaim(player, claim())).wallet.balance).toBe(
+      650,
+    );
+    const future = await service.releaseClaim(player, claim('future', 2));
+    expect(future.rewards[0]).toMatchObject({
+      amount: 0,
+      status: 'rejected',
+      reason: 'STALE_GAME',
+    });
+    expect(future.wallet.rewardEpoch).toBe(0);
+    expect(future.wallet.balance).toBe(650);
+  });
+  it('validates bounded batches, capture IDs and epochs and refuses every client-supplied payout or reward field before writing', async () => {
+    const original = await repository.get(2);
+    const invalid: any[] = [
+      {},
+      { releases: [] },
+      { releases: null },
+      { releases: Array.from({ length: 101 }, () => claim().releases[0]) },
+      ...['', ' ', 'x'.repeat(129), '__bad/id'].map((captureId) =>
+        claim(captureId),
+      ),
+      ...[-1, 1.5, null, '0', Number.MAX_SAFE_INTEGER + 1].map((epoch) =>
+        claim('bad', epoch as any),
+      ),
+      ...[
+        'amount',
+        'source',
+        'color',
+        'items',
+        'badgeId',
+        'penaltyVersion',
+        'userId',
+        'clientId',
+        'rewardId',
+        'pokemon',
+        'party',
+      ].map((key) => ({ releases: [{ ...claim().releases[0], [key]: 999 }] })),
+      { ...claim(), amount: 999 },
+    ];
+    for (const payload of invalid)
+      await expect(service.releaseClaim(player, payload)).rejects.toMatchObject(
+        { code: 'INVALID_INPUT' },
+      );
+    await expect(
+      service.rewardClaim(player, { rewards: [claim().releases[0]] }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(await repository.get(2)).toEqual(original);
+    const maximum = await service.releaseClaim(player, claim('x'.repeat(128)));
+    expect(maximum.rewards[0].rewardId.length).toBe(138);
+    expect(maximum.wallet.balance).toBe(650);
+  });
+  it('rejects administrators, changed identities, revoked authentication and disconnects before any new receipt', async () => {
+    const original = await repository.get(2);
+    const admin = {
+      ...player,
+      user: { ...player.user, role: 'admin' as const },
+    };
+    await expect(service.releaseClaim(admin, claim())).rejects.toMatchObject({
+      code: 'PLAYER_REQUIRED',
+    });
+    auth.authenticate = async () => ({ user: { ...player.user, id: 3 } });
+    await expect(service.releaseClaim(player, claim())).rejects.toMatchObject({
+      code: 'INVALID_PLAYER',
+    });
+    auth.authenticate = async () => {
+      throw new Error('Session revoked');
+    };
+    await expect(service.releaseClaim(player, claim())).rejects.toThrow(
+      'Session revoked',
+    );
+    auth.authenticate = async () => {
+      service.disconnect(player.socketId);
+      return { user: player.user };
+    };
+    await expect(service.releaseClaim(player, claim())).rejects.toMatchObject({
+      code: 'SESSION_CHANGED',
+    });
+    expect(await repository.get(2)).toEqual(original);
+  });
+  it('rejects unsafe balance increments without recording a completed release', async () => {
+    repository.rows.get(2).balance = Number.MAX_SAFE_INTEGER - 100;
+    const original = await repository.get(2);
+    await expect(service.releaseClaim(player, claim())).rejects.toMatchObject({
+      code: 'WALLET_CONFLICT',
+    });
+    expect(await repository.get(2)).toEqual(original);
+  });
 });

@@ -3150,6 +3150,49 @@ describe('Shop Socket.IO authenticated namespace', () => {
       'PLAYER_REQUIRED',
     );
   });
+  it('advertises release rewards, pays one fixed release over Socket.IO and publishes its balance without exposing another account receipt', async () => {
+    const player = await connect(2),
+      admin = await connect(1),
+      other = await connect(3);
+    const initial = await emit(player, 'shop:sync', {});
+    expect(initial.releaseRewardsVersion).toBe(1);
+    expect(initial.wallet.balance).toBe(500);
+    expect((await emit(admin, 'shop:sync', {})).releaseRewardsVersion).toBe(1);
+    const prepares = jest.fn();
+    player.on('shop:prepare', prepares);
+    const payload = { releases: [{ captureId: 'socket-release', epoch: 0 }] };
+    const first = await emit(player, 'shop:release-claim', payload);
+    expect(first.ok).toBe(true);
+    expect(first.wallet.balance).toBe(650);
+    expect(first.rewards[0]).toMatchObject({
+      rewardId: 'release:0:socket-release',
+      source: 'pokemon-release',
+      captureId: 'socket-release',
+      epoch: 0,
+      amount: 150,
+      status: 'credited',
+    });
+    const replay = await emit(player, 'shop:release-claim', payload);
+    expect(replay.rewards).toEqual(first.rewards);
+    expect(replay.wallet.balance).toBe(650);
+    expect(
+      (await emit(admin, 'shop:sync', {})).players.find(
+        (entry) => entry.user.id === 2,
+      ).wallet.balance,
+    ).toBe(650);
+    expect((await emit(other, 'shop:sync', {})).rewards).toEqual([]);
+    expect((await emit(admin, 'shop:release-claim', payload)).error.code).toBe(
+      'PLAYER_REQUIRED',
+    );
+    expect(
+      (
+        await emit(player, 'shop:release-claim', {
+          releases: [{ ...payload.releases[0], amount: 999 }],
+        })
+      ).error.code,
+    ).toBe('INVALID_INPUT');
+    expect(prepares).not.toHaveBeenCalled();
+  });
   it('settles local consumptions over Socket.IO without PREPARE and broadcasts the client watermark including terminal stock conflicts', async () => {
     const admin = await connect(1),
       player = await connect(2),

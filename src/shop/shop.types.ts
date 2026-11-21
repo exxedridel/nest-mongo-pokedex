@@ -229,6 +229,8 @@ export type ShopPlayer = {
   pendingConsumption?: boolean;
 };
 export type ShopState = {
+  /** Credits one durable player-side release without uploading its Party. */
+  releaseRewardsVersion?: 1;
   /** Capability advertisement only; never stored in wallets or catalogues. */
   resetStarterItemsVersion?: 1;
   rewards?: CombatReward[];
