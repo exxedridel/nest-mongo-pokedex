@@ -243,16 +243,20 @@ esperar esa lectura antes de devolver el ACK de PREPARE.
 
 ### Liberar Pokémon
 
-Desde React 2.23, `shop:release-claim {releases:[{captureId,epoch}]}` entrega
-150 Pokedollars por Pokémon liberado de la Party. Sólo acepta al jugador
-autenticado, fija el monto y usa el ledger/CAS de recompensas con
+Desde React 2.23.1, `shop:release-claim {releases:[{captureId,epoch,level?}]}` entrega
+el nivel multiplicado por 10 Pokedollars por Pokémon liberado de la Party.
+`level` debe ser entero de 1 a 100. Sólo acepta al jugador
+autenticado, calcula el monto y usa el ledger/CAS de recompensas con
 `source:'pokemon-release'` e identidad por cuenta/partida/captura. Repetir el
 reclamo devuelve su recibo exacto, también fuera de los 50 últimos de sync;
-una partida anterior recibe `STALE_GAME`/0. No cambia objetos ni medallas.
-Sync anuncia `releaseRewardsVersion:1` para que React compruebe compatibilidad
+una partida anterior recibe `STALE_GAME`/0. Sin `level` mantiene 150 PD para
+intentos/recibos antiguos y conserva sus hashes; no se recalculan pagos previos.
+El primer recibo persistido prevalece aunque otro dispositivo presente un nivel
+distinto. No cambia objetos ni medallas.
+Sync anuncia `releaseRewardsVersion:2` para que React compruebe compatibilidad
 antes de eliminar. La Party y su eliminación siguen en React; no se traslada
 el juego al servidor. Ver [SHOP_PROTOCOL.md](../SHOP_PROTOCOL.md).
-Desplegar Nest antes de React y recargar a 2.23.0.
+Desplegar Nest antes de React y recargar a 2.23.1.
 
 ### Reinicio de partida
 

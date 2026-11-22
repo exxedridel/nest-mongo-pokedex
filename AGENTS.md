@@ -1,5 +1,14 @@
 # Contexto de la trilogia Pokemon
 
+Corrección vigente2026-11-21 React2.23.1/Nest: releaseClaimlevel?:int1..100,
+nuevo amount=level×10 calculadoNest, capreleaseRewardsVersion2. Sinlevelold150/
+hashidéntico. SameRelease user/epoch/capture FIRSTreceiptpersistido prevalece
+inclniveldistinto/old150, no upgrade/secondcredit; otrosrewardhashes/Centerigual.
+307Shop86PvP/build/formato PASS. React7puro15dinero55wallet/TS/build/audit178 yChromeRelease4
+PASSsinJSerrors/cleanup20→200/100→1000/reload/doubleclick/quotafault/resetSTALE0.
+Ver Punto/SHOP_PROTOCOL. Nest→React2.23.1sinvars/MySQL/seed/reset/borrados/
+commit/push/deploy; producción no verificada.
+
 Etapa vigente2026-11-21 React2.23/Nest: shop:release-claim{releases:[{captureId,
 epoch}]}strict1–100 autentica jugador/fijo150/ledgerCAS sourcepokemon-release,
 rewardIdrelease:epoch:captureId/porcuenta dedupdispositivos/reload/lostreply;

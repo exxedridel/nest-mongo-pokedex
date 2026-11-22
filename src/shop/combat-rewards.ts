@@ -38,12 +38,16 @@ export type LocalTrainerRewardClaim = {
 export type PokemonReleaseClaim = {
   captureId: string;
   epoch: number;
+  /** Absent on previously saved release intents, which retain their 150 PD. */
+  level?: number;
 };
 export type CombatReward = {
   rewardId: string;
   userId: number;
   source: 'local-trainer' | 'admin-trainer' | 'pokemon-release';
   captureId?: string;
+  /** Captured before a new player-side release; never inferred for old receipts. */
+  level?: number;
   encounterId?: string;
   battleId?: string;
   epoch: number;

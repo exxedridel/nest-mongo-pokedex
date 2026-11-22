@@ -708,14 +708,18 @@ describe('Automatic combat rewards in the authoritative wallet', () => {
   );
 });
 
-describe('Durable fixed payouts for player-side Pokémon releases', () => {
+describe('Durable level-based and legacy payouts for player-side Pokémon releases', () => {
   let repository: MemoryShopRepository;
   let service: ShopService;
   let activity: PlayerActivityService;
   let player: Actor;
   let auth: any;
-  const claim = (captureId = 'released-pokemon', epoch = 0) => ({
-    releases: [{ captureId, epoch }],
+  const claim = (
+    captureId = 'released-pokemon',
+    epoch = 0,
+    level?: number,
+  ) => ({
+    releases: [{ captureId, epoch, ...(level === undefined ? {} : { level }) }],
   });
   beforeEach(async () => {
     player = {
@@ -738,6 +742,162 @@ describe('Durable fixed payouts for player-side Pokémon releases', () => {
     service.connect(player);
     await service.presence(player, { ready: true, localBattle: false });
   });
+  it.each([1, 15, 20, 100])(
+    'derives a level %i release payout as level × 10 and persists the exact immutable receipt once',
+    async (level) => {
+      const first = await service.releaseClaim(
+        player,
+        claim('leveled', 0, level),
+      );
+      expect(first.wallet.balance).toBe(500 + level * 10);
+      expect(first.rewards).toEqual([
+        {
+          rewardId: 'release:0:leveled',
+          userId: 2,
+          source: 'pokemon-release',
+          captureId: 'leveled',
+          epoch: 0,
+          level,
+          amount: level * 10,
+          walletRevision: 1,
+          status: 'credited',
+        },
+      ]);
+      const saved = await repository.get(2);
+      expect(saved.rewards[0].requestHash).toBe(
+        digest([
+          'combat-reward-v1',
+          {
+            rewardId: 'release:0:leveled',
+            userId: 2,
+            source: 'pokemon-release',
+            captureId: 'leveled',
+            epoch: 0,
+            level,
+            amount: level * 10,
+          },
+        ]),
+      );
+      expect(
+        (await service.releaseClaim(player, claim('leveled', 0, level)))
+          .rewards,
+      ).toEqual(first.rewards);
+      expect(await repository.get(2)).toEqual(saved);
+    },
+  );
+  it('retains a pre-upgrade fixed 150 PD receipt and its original hash when a new device reports a higher level', async () => {
+    const first = await service.releaseClaim(player, claim());
+    const original = await repository.get(2);
+    expect(first.rewards[0]).not.toHaveProperty('level');
+    service = new ShopService(repository, auth, activity);
+    await service.onModuleInit();
+    service.connect(player);
+    const replay = await service.releaseClaim(
+      player,
+      claim('released-pokemon', 0, 100),
+    );
+    expect(replay.rewards).toEqual(first.rewards);
+    expect(replay.wallet.balance).toBe(650);
+    expect(await repository.get(2)).toEqual(original);
+  });
+  it('retains a level-based receipt when a legacy 150 PD outbox replays that same capture', async () => {
+    const first = await service.releaseClaim(player, claim('new-first', 0, 20));
+    const original = await repository.get(2);
+    const replay = await service.releaseClaim(player, claim('new-first'));
+    expect(replay.rewards).toEqual(first.rewards);
+    expect(replay.wallet.balance).toBe(700);
+    expect(await repository.get(2)).toEqual(original);
+  });
+  it('settles differing simultaneous device snapshots once and returns the first persisted receipt to both devices and later replays', async () => {
+    const alternate = {
+      ...player,
+      socketId: 'new-level-socket',
+      clientId: 'new-level-client',
+    };
+    service.connect(alternate);
+    const [first, other] = await Promise.all([
+      service.releaseClaim(player, claim('same-capture', 0, 20)),
+      service.releaseClaim(alternate, claim('same-capture', 0, 50)),
+    ]);
+    expect(other.rewards).toEqual(first.rewards);
+    const saved = await repository.get(2);
+    expect(saved.rewards).toHaveLength(1);
+    expect(saved.balance).toBe(500 + first.rewards[0].level * 10);
+    expect(saved.revision).toBe(1);
+    for (const level of [1, 15, 100])
+      expect(
+        (await service.releaseClaim(alternate, claim('same-capture', 0, level)))
+          .rewards,
+      ).toEqual(first.rewards);
+    expect(await repository.get(2)).toEqual(saved);
+  });
+  it('keeps a stale level-based release terminal after reset and preserves its first level instead of paying a later snapshot', async () => {
+    const reset = await service.reset(player, {
+      requestId: 'new-release-game',
+      expectedWalletRevision: 0,
+      starterItemsVersion: 1,
+    });
+    const first = await service.releaseClaim(
+      player,
+      claim('late-release', 0, 60),
+    );
+    expect(first.rewards[0]).toMatchObject({
+      level: 60,
+      amount: 0,
+      status: 'rejected',
+      reason: 'STALE_GAME',
+    });
+    await service.resetApplied(player, {
+      requestId: 'new-release-game',
+      revision: reset.reset.walletRevision,
+    });
+    const saved = await repository.get(2);
+    expect(
+      (await service.releaseClaim(player, claim('late-release', 0, 100)))
+        .rewards,
+    ).toEqual(first.rewards);
+    expect(
+      (await service.releaseClaim(player, claim('late-release'))).rewards,
+    ).toEqual(first.rewards);
+    expect(await repository.get(2)).toEqual(saved);
+    expect(
+      (await service.releaseClaim(player, claim('late-release', 1, 20))).wallet
+        .balance,
+    ).toBe(700);
+    expect((await repository.get(2)).items).toEqual({ 'poke-ball': 6 });
+  });
+  it('validates every provided release level as an integer between 1 and 100, including replays, and rejects client-supplied amounts', async () => {
+    const first = await service.releaseClaim(
+      player,
+      claim('valid-level', 0, 15),
+    );
+    const original = await repository.get(2);
+    for (const level of [
+      0,
+      101,
+      -1,
+      15.5,
+      NaN,
+      Infinity,
+      null,
+      '15',
+      true,
+      {},
+      [],
+    ])
+      await expect(
+        service.releaseClaim(player, claim('valid-level', 0, level as any)),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(
+      service.releaseClaim(player, {
+        releases: [{ ...claim('valid-level', 0, 15).releases[0], amount: 150 }],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(
+      (await service.releaseClaim(player, claim('valid-level', 0, 15))).rewards,
+    ).toEqual(first.rewards);
+    expect(await repository.get(2)).toEqual(original);
+  });
   it('advertises support without changing a wallet, then pays exactly 150 PD while retaining stock, badges and all old receipt hashes', async () => {
     const prior = await service.rewardClaim(player, {
       rewards: [{ encounterId: 'prior-trainer', color: 'pink', epoch: 0 }],
@@ -745,7 +905,7 @@ describe('Durable fixed payouts for player-side Pokémon releases', () => {
     repository.rows.get(2).items = { 'poke-ball': 3, tm: 2 };
     repository.rows.get(2).badges = ['boulder'];
     const before = await repository.get(2);
-    expect((await service.sync(player)).releaseRewardsVersion).toBe(1);
+    expect((await service.sync(player)).releaseRewardsVersion).toBe(2);
     expect(await repository.get(2)).toEqual(before);
     const first = await service.releaseClaim(player, claim());
     expect(first.wallet.balance).toBe(850);

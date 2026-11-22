@@ -3150,36 +3150,44 @@ describe('Shop Socket.IO authenticated namespace', () => {
       'PLAYER_REQUIRED',
     );
   });
-  it('advertises release rewards, pays one fixed release over Socket.IO and publishes its balance without exposing another account receipt', async () => {
+  it('advertises level-based release rewards, pays its first snapshot once over Socket.IO and publishes its balance without exposing another account receipt', async () => {
     const player = await connect(2),
       admin = await connect(1),
       other = await connect(3);
     const initial = await emit(player, 'shop:sync', {});
-    expect(initial.releaseRewardsVersion).toBe(1);
+    expect(initial.releaseRewardsVersion).toBe(2);
     expect(initial.wallet.balance).toBe(500);
-    expect((await emit(admin, 'shop:sync', {})).releaseRewardsVersion).toBe(1);
+    expect((await emit(admin, 'shop:sync', {})).releaseRewardsVersion).toBe(2);
     const prepares = jest.fn();
     player.on('shop:prepare', prepares);
-    const payload = { releases: [{ captureId: 'socket-release', epoch: 0 }] };
+    const payload = {
+      releases: [{ captureId: 'socket-release', epoch: 0, level: 20 }],
+    };
     const first = await emit(player, 'shop:release-claim', payload);
     expect(first.ok).toBe(true);
-    expect(first.wallet.balance).toBe(650);
+    expect(first.wallet.balance).toBe(700);
     expect(first.rewards[0]).toMatchObject({
       rewardId: 'release:0:socket-release',
       source: 'pokemon-release',
       captureId: 'socket-release',
       epoch: 0,
-      amount: 150,
+      level: 20,
+      amount: 200,
       status: 'credited',
     });
     const replay = await emit(player, 'shop:release-claim', payload);
     expect(replay.rewards).toEqual(first.rewards);
-    expect(replay.wallet.balance).toBe(650);
+    expect(replay.wallet.balance).toBe(700);
+    const differingSnapshot = await emit(player, 'shop:release-claim', {
+      releases: [{ captureId: 'socket-release', epoch: 0, level: 100 }],
+    });
+    expect(differingSnapshot.rewards).toEqual(first.rewards);
+    expect(differingSnapshot.wallet.balance).toBe(700);
     expect(
       (await emit(admin, 'shop:sync', {})).players.find(
         (entry) => entry.user.id === 2,
       ).wallet.balance,
-    ).toBe(650);
+    ).toBe(700);
     expect((await emit(other, 'shop:sync', {})).rewards).toEqual([]);
     expect((await emit(admin, 'shop:release-claim', payload)).error.code).toBe(
       'PLAYER_REQUIRED',

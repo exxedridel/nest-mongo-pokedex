@@ -391,7 +391,7 @@ export class ShopService implements OnModuleInit {
     if (actor.user.role === 'player') {
       const row = await this.ensureWallet(actor.user.id);
       return {
-        releaseRewardsVersion: 1,
+        releaseRewardsVersion: 2,
         resetStarterItemsVersion: 1,
         catalog,
         ...(payload.centerRequestId &&
@@ -558,7 +558,7 @@ export class ShopService implements OnModuleInit {
       ? centerHeals.find((entry) => entry.requestId === payload.centerRequestId)
       : undefined;
     return {
-      releaseRewardsVersion: 1,
+      releaseRewardsVersion: 2,
       resetStarterItemsVersion: 1,
       catalog,
       players,
@@ -2218,6 +2218,14 @@ export class ShopService implements OnModuleInit {
           (entry) => entry.rewardId === request.rewardId,
         );
         if (prior) {
+          // Tabs may release the same locally held capture at different levels,
+          // or replay an old 150 PD intent. The first saved release is final.
+          const sameRelease =
+            prior.source === 'pokemon-release' &&
+            request.source === 'pokemon-release' &&
+            prior.userId === request.userId &&
+            prior.captureId === request.captureId &&
+            prior.epoch === request.epoch;
           const sameSubject = (entry: CombatReward) =>
             digest([
               entry.rewardId,
@@ -2232,6 +2240,7 @@ export class ShopService implements OnModuleInit {
           const contraryOutcome = (prior.penaltyVersion === 1) !== penalty;
           if (
             prior.requestHash !== requestHash &&
+            !sameRelease &&
             (!contraryOutcome ||
               sameSubject(prior) !== sameSubject(request as CombatReward))
           )
@@ -2464,7 +2473,7 @@ export class ShopService implements OnModuleInit {
     return { ...(await this.sync(actor)), rewards };
   }
 
-  /** The Party change is already durable in React. Only its fixed payout and
+  /** The Party change is already durable in React. Only its derived payout and
    * account/epoch/capture identity are stored here; retries return the receipt. */
   async releaseClaim(actor: Actor, payload: any): Promise<ShopState> {
     object(payload, ['releases']);
@@ -2475,9 +2484,10 @@ export class ShopService implements OnModuleInit {
     )
       fail('INVALID_INPUT', 'Envía de una a cien liberaciones pendientes.');
     for (const claim of payload.releases) {
-      object(claim, ['captureId', 'epoch']);
+      object(claim, ['captureId', 'epoch', 'level']);
       id(claim.captureId);
       integer(claim.epoch);
+      if (claim.level !== undefined) integer(claim.level, 1, 100);
     }
     this.self(actor);
     if (actor.user.role !== 'player')
@@ -2497,7 +2507,8 @@ export class ShopService implements OnModuleInit {
             source: 'pokemon-release',
             captureId: claim.captureId,
             epoch: claim.epoch,
-            amount: 150,
+            amount: claim.level === undefined ? 150 : claim.level * 10,
+            ...(claim.level === undefined ? {} : { level: claim.level }),
           })),
         );
       },
