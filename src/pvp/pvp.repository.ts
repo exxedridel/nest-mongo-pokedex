@@ -19,6 +19,8 @@ export const PvpBattleSchema = new Schema(
   {
     _id: { type: String, required: true },
     battleId: { type: String, required: true },
+    expShareVersion: { type: Number, enum: [1], default: undefined },
+    expShare: Schema.Types.Mixed,
     levelRewards: { type: String, enum: ['immediate'], default: undefined },
     rewardBundleVersion: { type: Number, enum: [1, 2], default: undefined },
     lossPenaltyVersion: { type: Number, enum: [1], default: undefined },

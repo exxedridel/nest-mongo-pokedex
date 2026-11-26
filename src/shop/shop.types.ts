@@ -15,6 +15,7 @@ export const SHOP_CATALOG = {
   'max-elixir': 700,
   'max-revive': 300,
   'rare-candy': 300,
+  'exp-share': 2000,
   tm: 500,
   bicycle: 1200,
 } as const;

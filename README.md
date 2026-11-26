@@ -5,6 +5,23 @@ comunica las instancias React por Socket.IO. `/mensajes-prueba` permite elegir
 cualquier otro usuario registrado y conversar en privado. No hay una lista fija
 de dos correos. Las batallas y la Tienda usan los namespaces descritos abajo.
 
+## Exp. Share (React 2.24)
+
+Nuevo objeto `exp-share` por2000 PD iniciales, comprable y regalable, con precio
+editable desde Back office. Es permanente/pasivo y no pertenece a los objetos
+usables ni consumibles. Una o varias unidades habilitan el mismo efecto:
+cada compañero del autor de un KO/captura recibe un nivel, sin añadir otro al
+autor y sin revivir debilitados. El cálculo y motor permanecen en React.
+
+Las nuevas batallas administrativas solicitan `expShareVersion:1`. Al recibir
+los snapshots, Nest fija `expShare:{version:1,eligibleSides:[...]}` según stock
+central de los humanos y valida el ledger y los destinatarios de cada KO.
+`sharedCaptureIds` añade un nivel por compañero y evento; se contempla en los
+checkpoints y resultados sin volver a sumarlo al salir. Las reservas/eventos
+anteriores conservan contratos, snapshots y hashes sin premios retrospectivos.
+Desplegar Nest antes de React y recargar a2.24.0, sin MySQL, nuevas variables,
+seed ni borrar partidas. Ver [BATTLE_REWARDS_PROTOCOL.md](../BATTLE_REWARDS_PROTOCOL.md).
+
 ## Max Revive y Rare Candy (React2.20)
 
 `max-revive` y `rare-candy` se compran y regalan con precio inicial300 PD cada

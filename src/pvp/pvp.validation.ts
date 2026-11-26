@@ -426,6 +426,19 @@ function rewardedCapture(original: Capture, level: number): Capture {
   });
   return output;
 }
+export function rewardLevelsForCapture(
+  entry: any,
+  side: Side,
+  captureId: string,
+): number {
+  if (entry?.winnerSide !== side) return 0;
+  if (entry?.winnerCaptureId === captureId)
+    return Number.isSafeInteger(entry?.levels) ? entry.levels : 0;
+  return Array.isArray(entry?.sharedCaptureIds) &&
+    entry.sharedCaptureIds.includes(captureId)
+    ? 1
+    : 0;
+}
 export function validateSession(session: any, battle: Battle) {
   object(session, [
     'version',
@@ -460,6 +473,24 @@ export function validateSession(session: any, battle: Battle) {
   )
     fail('INVALID_CHECKPOINT', 'Multiplicador de sesión no válido.');
   const immediate = battle.levelRewards === 'immediate';
+  const expShareEligibleSides =
+    battle.expShareVersion === 1 ? battle.expShare?.eligibleSides : undefined;
+  if (
+    battle.expShareVersion === 1 &&
+    (battle.expShare?.version !== 1 ||
+      !Array.isArray(expShareEligibleSides) ||
+      stableJson(expShareEligibleSides) !==
+        stableJson(
+          humanSides(battle).filter((side) =>
+            expShareEligibleSides.includes(side),
+          ),
+        ) ||
+      session.rewards === undefined)
+  )
+    fail(
+      'INVALID_CHECKPOINT',
+      'La progresión compartida no coincide con la reserva de EXP Share.',
+    );
   if (immediate) {
     object(session.rewards, [
       'version',
@@ -467,6 +498,7 @@ export function validateSession(session: any, battle: Battle) {
       'timing',
       'eligibleSides',
       'appliedCount',
+      'expShareEligibleSides',
     ]);
     if (
       session.rewards.version !== 1 ||
@@ -512,12 +544,7 @@ export function validateSession(session: any, battle: Battle) {
               (before?.pokemon.level ?? 1) +
                 session.rewards.defeats.reduce(
                   (sum: number, entry: any) =>
-                    sum +
-                    (entry?.winnerSide === side &&
-                    entry?.winnerCaptureId === mon.captureId &&
-                    Number.isSafeInteger(entry?.levels)
-                      ? entry.levels
-                      : 0),
+                    sum + rewardLevelsForCapture(entry, side, mon.captureId),
                   0,
                 ),
             )
@@ -596,9 +623,24 @@ export function validateSession(session: any, battle: Battle) {
     object(
       session.rewards,
       immediate
-        ? ['version', 'defeats', 'timing', 'eligibleSides', 'appliedCount']
-        : ['version', 'defeats'],
+        ? [
+            'version',
+            'defeats',
+            'timing',
+            'eligibleSides',
+            'appliedCount',
+            'expShareEligibleSides',
+          ]
+        : ['version', 'defeats', 'expShareEligibleSides'],
     );
+    if (
+      stableJson(session.rewards.expShareEligibleSides) !==
+      stableJson(expShareEligibleSides)
+    )
+      fail(
+        'INVALID_CHECKPOINT',
+        'El registro modifica la elegibilidad reservada de EXP Share.',
+      );
     const defeats = session.rewards.defeats;
     const prior = previousRewards?.defeats ?? [];
     if (
@@ -629,6 +671,7 @@ export function validateSession(session: any, battle: Battle) {
         'defeatedLevel',
         'levels',
         'levelRuleVersion',
+        'sharedCaptureIds',
       ]);
       id(entry.id);
       if (
@@ -652,6 +695,16 @@ export function validateSession(session: any, battle: Battle) {
         entry.defeatedSide
       ]?.pokemons.find((mon: any) => mon.captureId === entry.defeatedCaptureId);
       const validateLevels = !immediate || index >= prior.length;
+      const shared = expShareEligibleSides?.includes(entry.winnerSide)
+        ? battle.players[entry.winnerSide].snapshot.pokemons
+            .filter((mon) => mon.captureId !== entry.winnerCaptureId)
+            .map((mon) => mon.captureId)
+        : undefined;
+      if (stableJson(entry.sharedCaptureIds) !== stableJson(shared))
+        fail(
+          'INVALID_CHECKPOINT',
+          'EXP Share debe premiar exactamente al resto del equipo humano elegible.',
+        );
       if (
         !winner ||
         !defeated ||

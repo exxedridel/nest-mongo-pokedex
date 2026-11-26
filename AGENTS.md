@@ -1,5 +1,16 @@
 # Contexto de la trilogia Pokemon
 
+Etapa vigente2026-11-25 React2.24/Nest: SHOPexp-share2000pasivo11.ºitem fuera
+USABLE/CONSUMABLE; compra/gift/edit0preciosgenéricos. Nuevo createexpShareVersion1
+hashoptin/legacyidéntico; freezeexpShareeligibleSideshumanstock>0últimosnapshot,
+viewsprivacyownside. LedgersessionexpShareEligibleSides exact ysharedCaptureIds
+cadavencedortodosotrosParty+1; ganadornormal, NPCno. Validate/checkpoint/final
+immediate/deferred/KO/cap100 yeventoldhashes intactos.309Shop101PvP/build/formato
+PASS; React254core57wallet12Party7cuentas/TS/buildFINAL/audit178 yboundaryBagfix.
+ChromeExpShare5PASSsinJSerrors/cleanup(compra/KO/captura/Trainer/JcJ/stock2/
+capKO/reload1vez). Ver Punto/protocolos. Nest→React2.24sinvars/MySQL/seed/reset/
+borrados/commit/push/deploy; producción no verificada.
+
 Corrección vigente2026-11-21 React2.23.1/Nest: releaseClaimlevel?:int1..100,
 nuevo amount=level×10 calculadoNest, capreleaseRewardsVersion2. Sinlevelold150/
 hashidéntico. SameRelease user/epoch/capture FIRSTreceiptpersistido prevalece

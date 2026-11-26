@@ -85,6 +85,31 @@ describe('Mongo PvP serialization and recovery (real Mongoose, fake driver)', ()
     repository = new MongoPvpRepository(fixture.model);
   });
   afterEach(() => fixture.dispose());
+  it.each([[[]], [['a', 'b']]])(
+    'persists the frozen EXP Share opt-in and eligible sides %j without modifying snapshots or the empty ledger',
+    async (eligibleSides) => {
+      const input = battle();
+      input.expShareVersion = 1;
+      input.expShare = { version: 1, eligibleSides: eligibleSides as any };
+      input.session.rewards = {
+        version: 1,
+        defeats: [],
+        expShareEligibleSides: eligibleSides,
+      };
+      const originals = structuredClone(input.players);
+      await repository.insert(input);
+      const restored = await repository.get(input.battleId);
+      expect(restored.expShareVersion).toBe(1);
+      expect(restored.expShare).toEqual(input.expShare);
+      expect(restored.session.rewards).toEqual(input.session.rewards);
+      expect(restored.players).toEqual(originals);
+      restored.revision++;
+      expect(await repository.compareAndSwap(restored, 4)).toBe(true);
+      expect((await repository.get(input.battleId)).expShare).toEqual(
+        input.expShare,
+      );
+    },
+  );
   it('round-trips reward checkpoints, deferred levels and the durable payout outbox', async () => {
     const input = battle();
     input.session.rewards = {

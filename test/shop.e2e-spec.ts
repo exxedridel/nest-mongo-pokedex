@@ -129,6 +129,77 @@ describe('Authoritative Pokedollars and purchases', () => {
     expectedWalletRevision: 0,
     ...overrides,
   });
+  it('adds EXP Share at 2000 PD to an old catalogue without resetting administrator prices or rewriting its revision', async () => {
+    const row = await service.catalog.repository.get();
+    delete row.prices['exp-share'];
+    row.prices['full-restore'] = 123;
+    row.prices['poke-ball'] = 0;
+    await service.catalog.repository.compareAndSwap(row, row.revision);
+    const original = await service.catalog.repository.get();
+    expect((await service.catalog.snapshot()).prices).toMatchObject({
+      'exp-share': 2000,
+      'full-restore': 123,
+      'poke-ball': 0,
+    });
+    expect(await service.catalog.repository.get()).toEqual(original);
+    await service.priceSet(
+      clients[1],
+      priceInput({ itemId: 'exp-share', price: 0 }),
+    );
+    expect((await service.catalog.snapshot()).prices).toMatchObject({
+      'exp-share': 0,
+      'full-restore': 123,
+      'poke-ball': 0,
+    });
+  });
+  it('buys EXP Share at its server price, retains multiple units without making it consumable, and permits a later free price', async () => {
+    repo.rows.get(2).balance = 5000;
+    const bought = await service.purchase(
+      clients[1],
+      input({ itemId: 'exp-share', quantity: 2 }),
+    );
+    expect((await repo.get(2)).items['exp-share']).toBe(2);
+    expect((await repo.get(2)).balance).toBe(1000);
+    const receipt = bought.purchases[0];
+    expect(receipt).toMatchObject({
+      itemId: 'exp-share',
+      unitPrice: 2000,
+      quantity: 2,
+      total: 4000,
+    });
+    await service.applied(clients[2], {
+      purchaseId: receipt.purchaseId,
+      revision: 1,
+    });
+    await expect(
+      service.use(clients[2], {
+        requestId: 'cannot-consume-exp-share',
+        captureId: 'own',
+        context: 'party',
+        planHash: 'a'.repeat(64),
+        expectedWalletRevision: 1,
+        itemId: 'exp-share',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(() =>
+      validateChoice({ kind: 'item', item: 'exp-share', captureId: 'own' }),
+    ).toThrow();
+    await service.priceSet(
+      clients[1],
+      priceInput({ itemId: 'exp-share', price: 0 }),
+    );
+    await service.purchase(
+      clients[1],
+      input({
+        requestId: 'free-exp-share',
+        itemId: 'exp-share',
+        expectedCatalogRevision: 1,
+        expectedWalletRevision: 1,
+      }),
+    );
+    expect((await repo.get(2)).items['exp-share']).toBe(3);
+    expect((await repo.get(2)).balance).toBe(1000);
+  });
   it('requires advertised balance support and an operation-aware PREPARE acknowledgement before changing cash', async () => {
     await service.presence(clients[2], { ready: true, localBattle: false });
     const prepare = jest.fn(async () => ({ ok: true, revision: 0 }));

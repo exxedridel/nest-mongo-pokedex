@@ -322,6 +322,7 @@ describe('Durable PvP service, repository and private projection', () => {
     trainer = true,
     extraMembers = false,
     lossPenalty = false,
+    expShare?: { a: number; b?: number; deferred?: boolean; optIn?: boolean },
   ) {
     const activity = new PlayerActivityService();
     const wallets = new MemoryShopRepository();
@@ -335,10 +336,15 @@ describe('Durable PvP service, repository and private projection', () => {
     }
     for (const userId of [2, 3])
       await shop.presence(actors[userId], { ready: true, localBattle: false });
+    if (expShare) {
+      wallets.rows.get(2).items['exp-share'] = expShare.a;
+      wallets.rows.get(3).items['exp-share'] = expShare.b ?? 0;
+    }
     const created = await service.create(actors[1], {
       commandId: 'new-features',
       playerAId: 2,
-      levelRewards: 'immediate',
+      ...(!expShare?.deferred ? { levelRewards: 'immediate' } : {}),
+      ...(expShare && expShare.optIn !== false ? { expShareVersion: 1 } : {}),
       ...(trainer
         ? {
             trainerPresetId: 'kanto-brock',
@@ -375,6 +381,9 @@ describe('Durable PvP service, repository and private projection', () => {
       timing: 'immediate',
       eligibleSides: battle.mode === 'trainer' ? ['a'] : ['a', 'b'],
       appliedCount: 0,
+      ...(battle.expShare
+        ? { expShareEligibleSides: clone(battle.expShare.eligibleSides) }
+        : {}),
     },
   });
   async function lostTrainer(
@@ -614,6 +623,410 @@ describe('Durable PvP service, repository and private projection', () => {
       ...(levelRuleVersion === 2 ? { levelRuleVersion } : {}),
     });
   };
+  async function expShareBattle(
+    trainer = false,
+    deferred = false,
+    sixMembers = false,
+    a = 1,
+    b = 1,
+  ) {
+    const prepared = await featureBattle(trainer, true, false, {
+      a,
+      b,
+      deferred,
+    });
+    const ready = prepared.battle;
+    if (sixMembers) {
+      for (const side of (trainer ? ['a'] : ['a', 'b']) as ('a' | 'b')[]) {
+        const snap = ready.players[side].snapshot;
+        for (let index = 3; index < 6; index++)
+          snap.pokemons.push({
+            ...clone(snap.pokemons[0]),
+            captureId: `extra-${side}-${index}`,
+          });
+        fixtureLevel(snap.pokemons[1], 99);
+        fixtureLevel(snap.pokemons[2], 100);
+        for (const mon of snap.pokemons) mon.moves[0].currentPp = 4;
+        snap.baseHash = digest(snap.pokemons);
+      }
+      const previous = ready.revision++;
+      await repo.compareAndSwap(ready, previous);
+    }
+    const initial =
+      ready.levelRewards === 'immediate'
+        ? immediateSession(ready)
+        : {
+            ...session(ready),
+            rewards: {
+              version: 1,
+              defeats: [],
+              expShareEligibleSides: clone(ready.expShare.eligibleSides),
+            },
+          };
+    const battle = await service.checkpoint(actors[1], {
+      battleId: ready.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 0,
+      session: initial,
+      processedCommandIds: [],
+    });
+    return { ...prepared, battle };
+  }
+  function sharedDefeat(
+    battle: Battle,
+    winner: 'a' | 'b' = 'a',
+    defeatedIndex = 0,
+    finished = false,
+  ) {
+    const next = clone(battle.session);
+    next.runtime.serial++;
+    fixtureDefeat(next, winner, winner === 'a' ? 'b' : 'a', defeatedIndex, 2);
+    const entry = next.rewards.defeats[next.rewards.defeats.length - 1];
+    if (battle.expShare.eligibleSides.includes(winner))
+      entry.sharedCaptureIds = battle.players[winner].snapshot.pokemons
+        .filter((mon) => mon.captureId !== entry.winnerCaptureId)
+        .map((mon) => mon.captureId);
+    if (battle.levelRewards === 'immediate') {
+      for (const side of (battle.mode === 'trainer' ? ['a'] : ['a', 'b']) as (
+        | 'a'
+        | 'b'
+      )[])
+        for (const mon of next.teams[side].pokemons) {
+          const gain =
+            side !== winner
+              ? 0
+              : mon.captureId === entry.winnerCaptureId
+                ? entry.levels
+                : entry.sharedCaptureIds?.includes(mon.captureId)
+                  ? 1
+                  : 0;
+          if (gain) fixtureLevel(mon, Math.min(100, mon.pokemon.level + gain));
+        }
+      next.rewards.appliedCount = next.rewards.defeats.length;
+    }
+    if (finished) {
+      next.phase = 'finished';
+      next.runtime.ended = true;
+      next.runtime.winner = winner;
+    }
+    return next;
+  }
+  it.each([0, 1, 4])(
+    'freezes EXP Share eligibility from central stock %i, preserves snapshots and never stacks or consumes the item',
+    async (count) => {
+      const { battle, wallets } = await featureBattle(false, true, false, {
+        a: count,
+        b: 1,
+      });
+      expect(battle.expShare).toEqual({
+        version: 1,
+        eligibleSides: count ? ['a', 'b'] : ['b'],
+      });
+      for (const side of ['a', 'b'] as const)
+        expect(battle.players[side].snapshot.baseHash).toBe(
+          digest(battle.players[side].snapshot.pokemons),
+        );
+      expect(battle.itemInventory.a).not.toHaveProperty('exp-share');
+      expect(service.view(battle, actors[2]).expShare.eligibleSides).toEqual(
+        count ? ['a'] : [],
+      );
+      expect(service.view(battle, actors[3]).expShare.eligibleSides).toEqual([
+        'b',
+      ]);
+      expect(service.view(battle, actors[1]).expShare).toEqual(battle.expShare);
+      const original = clone(battle);
+      wallets.rows.get(2).items['exp-share'] = count ? 0 : 99;
+      expect(
+        (await service.sync(actors[1], { battleId: battle.battleId })).state
+          .expShare,
+      ).toEqual(original.expShare);
+      expect((await repo.get(battle.battleId)).players).toEqual(
+        original.players,
+      );
+    },
+  );
+  it('freezes fresh stock only after the final snapshot, binds the creation flag and rejects client-provided entitlements or invalid versions', async () => {
+    const { battle: previous, wallets } = await featureBattle(
+      false,
+      false,
+      false,
+      { a: 0, b: 0 },
+    );
+    await service.cancel(actors[1], {
+      battleId: previous.battleId,
+      hostEpoch: 1,
+    });
+    const request = {
+      commandId: 'fresh-exp-share',
+      playerAId: 2,
+      playerBId: 3,
+      levelRewards: 'immediate',
+      expShareVersion: 1,
+    };
+    const collecting = await service.create(actors[1], request);
+    expect(collecting).not.toHaveProperty('expShare');
+    const a = snapshot(collecting, 2, actors[2].clientId),
+      b = snapshot(collecting, 3, actors[3].clientId);
+    await service.snapshot(actors[2], { snapshot: a });
+    wallets.rows.get(2).items['exp-share'] = 2;
+    const ready = await service.snapshot(actors[3], { snapshot: b });
+    expect(ready.expShare).toEqual({ version: 1, eligibleSides: ['a'] });
+    expect(ready.players.a.snapshot).toEqual(a);
+    expect(ready.players.b.snapshot).toEqual(b);
+    wallets.rows.get(2).items['exp-share'] = 0;
+    expect(
+      (await service.snapshot(actors[3], { snapshot: b })).expShare,
+    ).toEqual(ready.expShare);
+    expect((await service.create(actors[1], request)).creationHash).toBe(
+      ready.creationHash,
+    );
+    const { expShareVersion: _, ...legacyRequest } = request;
+    await expect(
+      service.create(actors[1], legacyRequest),
+    ).rejects.toMatchObject({ code: 'COMMAND_CONFLICT' });
+    for (const expShareVersion of [0, 2, null, '1', true])
+      await expect(
+        service.create(actors[1], { ...request, expShareVersion }),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(
+      service.create(actors[1], {
+        ...request,
+        expShare: { version: 1, eligibleSides: ['a', 'b'] },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+  it('allows a normal KO without sharing when neither reserved Bag owns EXP Share', async () => {
+    const { battle } = await expShareBattle(false, false, false, 0, 0);
+    const next = sharedDefeat(battle);
+    expect(next.rewards.expShareEligibleSides).toEqual([]);
+    expect(next.rewards.defeats[0]).not.toHaveProperty('sharedCaptureIds');
+    expect(next.teams.a.pokemons.map((mon) => mon.pokemon.level)).toEqual([
+      22, 20, 20,
+    ]);
+    expect(() => validateSession(next, battle)).not.toThrow();
+    next.rewards.defeats[0].sharedCaptureIds = [];
+    expect(() => validateSession(next, battle)).toThrow();
+  });
+  it.each([
+    [false, 'a'],
+    [false, 'b'],
+    [true, 'a'],
+  ] as const)(
+    'shares exactly one level with five reserves including KO/cap100 in trainer=%s winner=%s, preserving PP and primary status through finalization/replay',
+    async (trainer, winner) => {
+      const { battle, wallets } = await expShareBattle(
+        trainer,
+        false,
+        true,
+        4,
+        4,
+      );
+      const next = sharedDefeat(battle, winner, 0, true);
+      const reward = next.rewards.defeats[0];
+      expect(reward.sharedCaptureIds).toHaveLength(5);
+      const payload = {
+        battleId: battle.battleId,
+        hostEpoch: 1,
+        expectedCheckpointRevision: 1,
+        session: next,
+        processedCommandIds: [],
+      };
+      const saved = await service.checkpoint(actors[1], payload);
+      expect(
+        saved.session.teams[winner].pokemons.map((mon) => mon.pokemon.level),
+      ).toEqual([20 + reward.levels, 100, 100, 21, 21, 21]);
+      expect(
+        saved.session.teams[winner].pokemons[2].pokemon.stats[0].value,
+      ).toBe(0);
+      expect((await service.checkpoint(actors[1], payload)).revision).toBe(
+        saved.revision,
+      );
+      const done = await service.finalize(actors[1], {
+        battleId: battle.battleId,
+        hostEpoch: 1,
+      });
+      const result = done.results[winner];
+      expect(result.patches.map((patch) => patch.level)).toEqual([
+        20 + reward.levels,
+        100,
+        100,
+        21,
+        21,
+        21,
+      ]);
+      expect(result.patches[2].hp).toBe(0);
+      for (const patch of result.patches) {
+        expect(patch.statuses).toEqual(['burned']);
+        expect(patch.movesPp).toEqual([{ moveId: 1, currentPp: 4 }]);
+      }
+      expect(
+        (
+          await service.finalize(actors[1], {
+            battleId: battle.battleId,
+            hostEpoch: 1,
+          })
+        ).results,
+      ).toEqual(done.results);
+      expect(
+        (await wallets.get(winner === 'a' ? 2 : 3)).items['exp-share'],
+      ).toBe(4);
+    },
+  );
+  it('rejects missing, repeated, reordered, opponent or winning shared recipients and forged entitlement metadata without altering the reserved battle', async () => {
+    const { battle } = await expShareBattle();
+    const next = sharedDefeat(battle);
+    const targets = next.rewards.defeats[0].sharedCaptureIds;
+    for (const sharedCaptureIds of [
+      undefined,
+      [],
+      [next.teams.a.activeCaptureId],
+      [targets[0]],
+      [targets[0], targets[0]],
+      [...targets].reverse(),
+      [next.teams.b.activeCaptureId],
+    ]) {
+      const invalid = clone(next);
+      if (sharedCaptureIds === undefined)
+        delete invalid.rewards.defeats[0].sharedCaptureIds;
+      else invalid.rewards.defeats[0].sharedCaptureIds = sharedCaptureIds;
+      expect(() => validateSession(invalid, battle)).toThrow();
+    }
+    for (const eligible of [
+      undefined,
+      [],
+      ['a'],
+      ['b'],
+      ['b', 'a'],
+      ['a', 'a'],
+    ]) {
+      const invalid = clone(next);
+      invalid.rewards.expShareEligibleSides = eligible;
+      expect(() => validateSession(invalid, battle)).toThrow();
+    }
+    const tooMuch = clone(next);
+    fixtureLevel(tooMuch.teams.a.pokemons[1], 22);
+    expect(() => validateSession(tooMuch, battle)).toThrow();
+    expect((await repo.get(battle.battleId)).session.rewards.defeats).toEqual(
+      [],
+    );
+    expect((await repo.get(battle.battleId)).lockHeld).toBe(true);
+  });
+  it('saves shared levels after a resumed deferred battle once, with proportional HP and a fainted recipient still at zero', async () => {
+    const { battle, wallets } = await expShareBattle(false, true);
+    const next = sharedDefeat(battle, 'a', 0, true);
+    expect(next.teams.a.pokemons.map((mon) => mon.pokemon.level)).toEqual([
+      20, 20, 20,
+    ]);
+    await service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 1,
+      session: next,
+      processedCommandIds: [],
+    });
+    const done = await service.finalize(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+    });
+    expect(done.results.a.patches.map((patch) => patch.level)).toEqual([
+      22, 21, 21,
+    ]);
+    expect(done.results.a.patches[1].hp).toBe(72);
+    expect(done.results.a.patches[2].hp).toBe(0);
+    expect((await wallets.get(2)).items['exp-share']).toBe(1);
+  });
+  it('restores frozen eligibility and the exact shared prefix after reload, then appends another KO without repeating the first progression', async () => {
+    const { battle, shop, wallets } = await expShareBattle();
+    const first = sharedDefeat(battle);
+    const saved = await service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 1,
+      session: first,
+      processedCommandIds: [],
+    });
+    const prefix = stableJson(saved.session.rewards.defeats);
+    wallets.rows.get(2).items['exp-share'] = 0;
+    service = new PvpService(repo, auth as any, undefined, shop);
+    await service.onModuleInit();
+    for (const actor of Object.values(actors)) service.connect(actor);
+    const resumed = await repo.get(battle.battleId);
+    expect(stableJson(resumed.session.rewards.defeats)).toBe(prefix);
+    expect(resumed.expShare.eligibleSides).toEqual(['a', 'b']);
+    const second = sharedDefeat(resumed, 'a', 1, true);
+    const rewrite = clone(second);
+    rewrite.rewards.defeats[0].sharedCaptureIds.reverse();
+    expect(() => validateSession(rewrite, resumed)).toThrow();
+    const payload = {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 2,
+      session: second,
+      processedCommandIds: [],
+    };
+    const committed = await service.checkpoint(actors[1], payload);
+    expect(stableJson(committed.session.rewards.defeats.slice(0, 1))).toBe(
+      prefix,
+    );
+    expect(
+      committed.session.teams.a.pokemons.map((mon) => mon.pokemon.level),
+    ).toEqual([23, 22, 22]);
+    expect((await service.checkpoint(actors[1], payload)).revision).toBe(
+      committed.revision,
+    );
+  });
+  it('keeps older reservations and their reward ledger byte-for-byte compatible even when the account owns EXP Share', async () => {
+    const { battle } = await featureBattle(false, true, false, {
+      a: 2,
+      b: 2,
+      optIn: false,
+    });
+    expect(battle).not.toHaveProperty('expShareVersion');
+    expect(battle).not.toHaveProperty('expShare');
+    const initial = immediateSession(battle);
+    expect(initial.rewards).not.toHaveProperty('expShareEligibleSides');
+    const started = await service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 0,
+      session: initial,
+      processedCommandIds: [],
+    });
+    const next = clone(started.session);
+    next.runtime.serial++;
+    fixtureDefeat(next, 'a', 'b', 0, 2);
+    fixtureLevel(next.teams.a.pokemons[0], 22);
+    next.rewards.appliedCount = 1;
+    const forged = clone(next);
+    forged.rewards.defeats[0].sharedCaptureIds = ['second-2', 'fainted-2'];
+    expect(() => validateSession(forged, started)).toThrow();
+    const saved = await service.checkpoint(actors[1], {
+      battleId: battle.battleId,
+      hostEpoch: 1,
+      expectedCheckpointRevision: 1,
+      session: next,
+      processedCommandIds: [],
+    });
+    expect(stableJson(saved.players)).toBe(stableJson(battle.players));
+    expect(
+      saved.session.teams.a.pokemons.map((mon) => mon.pokemon.level),
+    ).toEqual([22, 20, 20]);
+    expect(saved.creationHash).toBe(
+      digest([2, 3, { levelRewards: 'immediate' }]),
+    );
+  });
+  it('never grants shared or personal levels to a winning NPC and rejects a forged NPC entitlement', async () => {
+    const { battle } = await expShareBattle(true);
+    const next = sharedDefeat(battle, 'b');
+    expect(next.rewards.defeats[0]).not.toHaveProperty('sharedCaptureIds');
+    expect(next.teams.b.pokemons).toEqual(battle.session.teams.b.pokemons);
+    const forged = clone(next);
+    forged.rewards.defeats[0].sharedCaptureIds = [
+      next.teams.b.pokemons[1].captureId,
+    ];
+    expect(() => validateSession(forged, battle)).toThrow();
+    expect(() => validateSession(next, battle)).not.toThrow();
+  });
   async function startLevelRuleBattle(
     winnerLevel = 20,
     defeatedLevel = 20,

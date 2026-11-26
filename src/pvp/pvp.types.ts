@@ -88,6 +88,8 @@ export type BattleTrainer = {
 };
 export type Battle = {
   battleId: string;
+  expShareVersion?: 1;
+  expShare?: { version: 1; eligibleSides: Side[] };
   levelRewards?: 'immediate';
   rewardBundleVersion?: 1 | 2;
   lossPenaltyVersion?: 1;

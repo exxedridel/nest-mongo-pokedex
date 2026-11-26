@@ -31,6 +31,7 @@ import {
   stableJson,
   validateChoice,
   validateSession,
+  rewardLevelsForCapture,
   validateSnapshot,
 } from './pvp.validation';
 
@@ -452,6 +453,9 @@ export class PvpService implements OnModuleInit {
       },
       players,
       applied: clone(battle.applied),
+      ...(battle.expShareVersion
+        ? { expShareVersion: battle.expShareVersion }
+        : {}),
       ...(battle.levelRewards ? { levelRewards: battle.levelRewards } : {}),
       ...(battle.rewardBundleVersion
         ? { rewardBundleVersion: battle.rewardBundleVersion }
@@ -481,6 +485,7 @@ export class PvpService implements OnModuleInit {
       state.trainer = admin ? clone(battle.trainer) : clone(descriptor);
     }
     if (admin) {
+      if (battle.expShare) state.expShare = clone(battle.expShare);
       state.inventory = clone(battle.inventory ?? {});
       state.itemInventory = clone(battle.itemInventory ?? {});
       state.session = clone(battle.session);
@@ -489,6 +494,13 @@ export class PvpService implements OnModuleInit {
     }
     const side = this.ownSide(battle, actor);
     state.side = side;
+    if (battle.expShare)
+      state.expShare = {
+        version: 1,
+        eligibleSides: battle.expShare.eligibleSides.filter(
+          (eligible) => eligible === side,
+        ),
+      };
     if (battle.players[side].snapshot)
       state.snapshot = clone(battle.players[side].snapshot);
     if (battle.session) {
@@ -537,9 +549,17 @@ export class PvpService implements OnModuleInit {
       'levelRewards',
       'rewardBundleVersion',
       'lossPenaltyVersion',
+      'expShareVersion',
     ]);
     id(payload.commandId);
     integer(payload.playerAId, 1);
+    if (payload.expShareVersion !== undefined && payload.expShareVersion !== 1)
+      fail('INVALID_INPUT', 'La versión de EXP Share no es válida.');
+    if (payload.expShareVersion === 1 && !this.shop)
+      fail(
+        'INVENTORY_UNAVAILABLE',
+        'No se puede confirmar EXP Share sin la Bag central.',
+      );
     const isTrainer = payload.trainerPresetId !== undefined;
     if (
       payload.lossPenaltyVersion !== undefined &&
@@ -579,7 +599,8 @@ export class PvpService implements OnModuleInit {
     const creationHash = digest(
       payload.levelRewards !== undefined ||
         payload.rewardBundleVersion !== undefined ||
-        payload.lossPenaltyVersion !== undefined
+        payload.lossPenaltyVersion !== undefined ||
+        payload.expShareVersion !== undefined
         ? [
             ...selection,
             {
@@ -592,6 +613,7 @@ export class PvpService implements OnModuleInit {
               ...(payload.lossPenaltyVersion
                 ? { lossPenaltyVersion: payload.lossPenaltyVersion }
                 : {}),
+              ...(payload.expShareVersion ? { expShareVersion: 1 } : {}),
             },
           ]
         : selection,
@@ -625,6 +647,7 @@ export class PvpService implements OnModuleInit {
     }
     const battle: Battle = {
       battleId: randomUUID(),
+      ...(payload.expShareVersion ? { expShareVersion: 1 as const } : {}),
       ...(payload.levelRewards ? { levelRewards: payload.levelRewards } : {}),
       ...(payload.rewardBundleVersion
         ? { rewardBundleVersion: payload.rewardBundleVersion }
@@ -709,13 +732,25 @@ export class PvpService implements OnModuleInit {
           if (this.shop) {
             battle.inventory ??= {};
             battle.itemInventory ??= {};
+            const expShareEligibleSides: Side[] = [];
             for (const human of humanSides(battle)) {
               const stock = await this.shop.battleItemStock(
                 battle.players[human].user.id,
               );
               battle.itemInventory[human] = stock;
               battle.inventory[human] = stock['full-restore'] ?? 0;
+              if (
+                battle.expShareVersion === 1 &&
+                ((await this.shop.repository.get(battle.players[human].user.id))
+                  ?.items['exp-share'] ?? 0) > 0
+              )
+                expShareEligibleSides.push(human);
             }
+            if (battle.expShareVersion === 1)
+              battle.expShare = {
+                version: 1,
+                eligibleSides: expShareEligibleSides,
+              };
           }
           battle.phase = 'ready';
         }
@@ -1088,13 +1123,16 @@ export class PvpService implements OnModuleInit {
                 statuses.includes('asleep') && mon.statusTurns?.asleep
                   ? { asleep: mon.statusTurns.asleep }
                   : {};
-              const gained = (battle.session.rewards?.defeats ?? [])
-                .filter(
-                  (entry: any) =>
-                    entry.winnerSide === side &&
-                    entry.winnerCaptureId === original.captureId,
-                )
-                .reduce((sum: number, entry: any) => sum + entry.levels, 0);
+              const gained = (battle.session.rewards?.defeats ?? []).reduce(
+                (sum: number, entry: any) =>
+                  sum + rewardLevelsForCapture(entry, side, original.captureId),
+                0,
+              );
+              const shared = (battle.session.rewards?.defeats ?? []).some(
+                (entry: any) =>
+                  entry.winnerSide === side &&
+                  entry.sharedCaptureIds?.includes(original.captureId),
+              );
               const immediate = battle.levelRewards === 'immediate';
               const level = immediate
                 ? mon.pokemon.level
@@ -1111,7 +1149,7 @@ export class PvpService implements OnModuleInit {
               return {
                 captureId: original.captureId,
                 hp: finalHp,
-                ...(leveled ? { level } : {}),
+                ...(leveled || shared ? { level } : {}),
                 statuses,
                 statusTurns,
                 ...(mon.moves.some((move: any) => move.currentPp !== undefined)
